@@ -6857,6 +6857,165 @@ function clearMultipartIssueStatus(node) {
 	  return canvas;
 	}
 
+	function writeAsciiString(view, offset, text) {
+	  for (let i = 0; i < text.length; i++) {
+		view.setUint8(offset + i, text.charCodeAt(i) & 255);
+	  }
+	}
+
+	function audioBufferToWavBytes(buffer) {
+	  const channelCount = Math.max(1, buffer.numberOfChannels || 1);
+	  const sampleRate = Math.max(1, Math.round(buffer.sampleRate || 44100));
+	  const frameCount = Math.max(0, buffer.length || 0);
+	  const bytesPerSample = 2;
+	  const blockAlign = channelCount * bytesPerSample;
+	  const byteRate = sampleRate * blockAlign;
+	  const dataSize = frameCount * blockAlign;
+	  const out = new Uint8Array(44 + dataSize);
+	  const view = new DataView(out.buffer);
+
+	  writeAsciiString(view, 0, 'RIFF');
+	  view.setUint32(4, 36 + dataSize, true);
+	  writeAsciiString(view, 8, 'WAVE');
+	  writeAsciiString(view, 12, 'fmt ');
+	  view.setUint32(16, 16, true);
+	  view.setUint16(20, 1, true);
+	  view.setUint16(22, channelCount, true);
+	  view.setUint32(24, sampleRate, true);
+	  view.setUint32(28, byteRate, true);
+	  view.setUint16(32, blockAlign, true);
+	  view.setUint16(34, 16, true);
+	  writeAsciiString(view, 36, 'data');
+	  view.setUint32(40, dataSize, true);
+
+	  const channels = [];
+	  for (let ch = 0; ch < channelCount; ch++) {
+		channels.push(buffer.getChannelData(ch));
+	  }
+
+	  let offset = 44;
+	  for (let i = 0; i < frameCount; i++) {
+		for (let ch = 0; ch < channelCount; ch++) {
+		  const sample = Math.max(-1, Math.min(1, channels[ch][i] || 0));
+		  const value = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+		  view.setInt16(offset, Math.round(value), true);
+		  offset += 2;
+		}
+	  }
+
+	  return out;
+	}
+
+	function formatAudioRangeLabel(startTime, endTime, minFreq, maxFreq) {
+	  const startLabel = Number(startTime).toFixed(3).replace(/\.000$/, '');
+	  const endLabel = Number(endTime).toFixed(3).replace(/\.000$/, '');
+	  const minLabel = String(Math.round(minFreq));
+	  const maxLabel = String(Math.round(maxFreq));
+	  return `${startLabel}-${endLabel}s ${minLabel}-${maxLabel}Hz`;
+	}
+
+	async function renderCroppedAudioClipBuffer(asset) {
+	  const bounds = await ensureAudioSpectrogramTimeBounds(asset);
+	  if (!bounds?.buffer) throw new Error('Unable to decode audio for clipping.');
+
+	  const { buffer, startTime, endTime, minFreq, maxFreq, nyquist } = bounds;
+	  const sampleRate = buffer.sampleRate;
+	  const startSample = Math.max(0, Math.min(buffer.length, Math.floor(startTime * sampleRate)));
+	  const endSample = Math.max(startSample + 1, Math.min(buffer.length, Math.ceil(endTime * sampleRate)));
+	  const frameCount = Math.max(1, endSample - startSample);
+
+	  const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+	  if (!OfflineCtx) throw new Error('OfflineAudioContext is unavailable in this browser.');
+
+	  const modeInfoRaw = getChannelDataForMode(buffer, audioSpectrogramChannelSelect.value);
+	  const channelCount = Math.max(1, modeInfoRaw.channels.length);
+	  const offline = new OfflineCtx(channelCount, frameCount, sampleRate);
+	  const clipBuffer = offline.createBuffer(channelCount, frameCount, sampleRate);
+
+	  for (let ch = 0; ch < channelCount; ch++) {
+		const src = modeInfoRaw.channels[ch] || modeInfoRaw.channels[0] || buffer.getChannelData(0);
+		const dest = clipBuffer.getChannelData(ch);
+		dest.set(src.subarray(startSample, endSample));
+	  }
+
+	  const source = offline.createBufferSource();
+	  source.buffer = clipBuffer;
+	  let tail = source;
+
+	  const safeMinFreq = Math.max(0, Math.min(minFreq, nyquist));
+	  const safeMaxFreq = Math.max(0, Math.min(maxFreq, nyquist));
+	  const needsHighpass = safeMinFreq > 0;
+	  const needsLowpass = safeMaxFreq > 0 && safeMaxFreq < nyquist;
+
+	  if (needsHighpass) {
+		const highpass = offline.createBiquadFilter();
+		highpass.type = 'highpass';
+		highpass.frequency.value = Math.max(1, safeMinFreq);
+		highpass.Q.value = Math.SQRT1_2;
+		tail.connect(highpass);
+		tail = highpass;
+	  }
+
+	  if (needsLowpass) {
+		const lowpass = offline.createBiquadFilter();
+		lowpass.type = 'lowpass';
+		lowpass.frequency.value = Math.max(1, Math.min(safeMaxFreq, nyquist - 1));
+		lowpass.Q.value = Math.SQRT1_2;
+		tail.connect(lowpass);
+		tail = lowpass;
+	  }
+
+	  tail.connect(offline.destination);
+	  source.start(0);
+
+	  return {
+		buffer: await offline.startRendering(),
+		bounds: {
+		  startTime,
+		  endTime,
+		  minFreq: safeMinFreq,
+		  maxFreq: safeMaxFreq,
+		  channel: modeInfoRaw.mode || audioSpectrogramChannelSelect.value || 'mix'
+		}
+	  };
+	}
+
+	async function buildCroppedAudioClipNode(asset) {
+	  if (!asset || !['audio', 'video'].includes(asset.kind) || !asset.node) return null;
+
+	  const rendered = await renderCroppedAudioClipBuffer(asset);
+	  const bytes = audioBufferToWavBytes(rendered.buffer);
+	  const { startTime, endTime, minFreq, maxFreq, channel } = rendered.bounds;
+	  const safeBaseLabel = String(asset.label || 'Audio').replace(/\.[^.]+$/, '');
+	  const rangeLabel = formatAudioRangeLabel(startTime, endTime, minFreq, maxFreq);
+	  const label = `${safeBaseLabel} [Audio Crop ${channel} ${rangeLabel}].wav`;
+
+	  return makeNode({
+		kind: 'audio',
+		role: 'derived_audio_clip',
+		label,
+		path: `${asset.path || asset.label}#audio_clip_${Date.now()}`,
+		byteStart: null,
+		byteEnd: null,
+		size: bytes.length,
+		mime: 'audio/wav',
+		ext: 'wav',
+		parentId: asset.node.id,
+		derived: true,
+		sourceNodeId: asset.node.id,
+		bytes,
+		meta: {
+		  derivedType: 'audio_spectrogram_crop',
+		  channel,
+		  startTime,
+		  endTime,
+		  minFreq,
+		  maxFreq
+		}
+	  });
+	}
+
+
 	function isTextViewerAsset(asset) {
 	  return !!asset && (asset.kind === 'text' || asset.kind === 'ascii' || asset.node?.role === 'derived_metadata_text');
 	}
@@ -8257,7 +8416,6 @@ async function appendCanvasToViewerStage(canvas) {
 	  updateImageTransformButtons();
 	  populateImageXorAssetSelect(asset);
 	  clearImageViewerStage();
-	  state.imageViewer.bitplaneXorApplied = !!state.imageViewer.bitplaneXorBaseCanvas;
 
 	  imageViewerStageEl.classList.toggle('text-stage', ['text', 'ascii'].includes(asset.kind) || asset.node?.role === 'derived_metadata_text');
 
@@ -8356,11 +8514,19 @@ async function appendCanvasToViewerStage(canvas) {
 		const settingsLabel = describeBitplaneSettings(settings);
 
 		const safeBaseLabel = String(asset.label || 'Image').replace(/\.[^.]+$/, '');
-		const labelPrefix = state.imageViewer.bitplaneXorApplied
-		  ? `${safeBaseLabel}_BitwiseXOR`
-		  : (asset.kind === 'video'
-		    ? `Saved Video Frame ${getStoredVideoFrameTime(asset).toFixed(3)}s - ${settingsLabel}`
-		    : `Saved View - ${settingsLabel}`);
+		const settingsParts = [];
+		const xorWasApplied =
+		  !!state.imageViewer.bitplaneXorApplied &&
+		  !!state.imageViewer.bitplaneXorBaseCanvas &&
+		  state.imageViewer.bitplaneXorAssetKey === getImageViewerAssetKey(asset);
+
+		if (xorWasApplied) settingsParts.push('BitwiseXOR');
+		if (settingsLabel) settingsParts.push(settingsLabel);
+
+		const settingsText = settingsParts.join('_');
+		const labelPrefix = asset.kind === 'video'
+		  ? `Saved Video Frame ${getStoredVideoFrameTime(asset).toFixed(3)}s${settingsText ? ` - ${settingsText}` : ''}`
+		  : `${safeBaseLabel}${settingsText ? `_${settingsText}` : ''}`;
 		asset.node.children.push(makeNode({
 		  kind: 'image',
 		  role: 'derived_image_preview',
@@ -8776,36 +8942,60 @@ async function appendCanvasToViewerStage(canvas) {
 	audioSpectrogramSaveBtn.addEventListener('click', async () => {
 	  const asset = getCurrentImageViewerAsset();
 	  const canvas = state.imageViewer.currentSpectrogramCanvas;
-	  if (!asset || !['audio', 'video'].includes(asset.kind) || !canvas || !asset.node) return;
+	  if (!asset || !['audio', 'video'].includes(asset.kind) || !asset.node) return;
 
-	  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-	  if (!blob) return;
+	  if (audioSpectrogramSaveBtn) audioSpectrogramSaveBtn.disabled = true;
+	  audioSpectrogramStatusEl.className = 'muted';
+	  audioSpectrogramStatusEl.textContent = 'Saving spectrogram snapshot and cropped audio.';
 
-	  const bytes = new Uint8Array(await blob.arrayBuffer());
+	  try {
+		const savedItems = [];
 
-	  asset.node.children.push(makeNode({
-		kind: 'image',
-		role: 'derived_image_preview',
-		label: `${asset.label} [Spectrogram ${audioSpectrogramChannelSelect.value}].png`,
-		path: `${asset.path || asset.label}#spectrogram_${Date.now()}`,
-		byteStart: null,
-		byteEnd: null,
-		size: bytes.length,
-		mime: 'image/png',
-		ext: 'png',
-		parentId: asset.node.id,
-		derived: true,
-		sourceNodeId: asset.node.id,
-		bytes,
-		meta: {
-		  derivedType: 'audio_spectrogram_snapshot',
-		  channel: audioSpectrogramChannelSelect.value
+		if (canvas) {
+		  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+		  if (blob) {
+			const bytes = new Uint8Array(await blob.arrayBuffer());
+
+			asset.node.children.push(makeNode({
+			  kind: 'image',
+			  role: 'derived_image_preview',
+			  label: `${asset.label} [Spectrogram ${audioSpectrogramChannelSelect.value}].png`,
+			  path: `${asset.path || asset.label}#spectrogram_${Date.now()}`,
+			  byteStart: null,
+			  byteEnd: null,
+			  size: bytes.length,
+			  mime: 'image/png',
+			  ext: 'png',
+			  parentId: asset.node.id,
+			  derived: true,
+			  sourceNodeId: asset.node.id,
+			  bytes,
+			  meta: {
+				derivedType: 'audio_spectrogram_snapshot',
+				channel: audioSpectrogramChannelSelect.value
+			  }
+			}));
+			savedItems.push('snapshot to Images');
+		  }
 		}
-	  }));
 
-	  refreshCatalogViews();
-	  audioSpectrogramStatusEl.className = 'ok';
-	  audioSpectrogramStatusEl.textContent = 'Snapshot saved to Images.';
+		const audioClipNode = await buildCroppedAudioClipNode(asset);
+		if (audioClipNode) {
+		  asset.node.children.push(audioClipNode);
+		  savedItems.push('cropped WAV to Audio');
+		}
+
+		refreshCatalogViews();
+		audioSpectrogramStatusEl.className = 'ok';
+		audioSpectrogramStatusEl.textContent = savedItems.length
+		  ? `Saved ${savedItems.join(' and ')}.`
+		  : 'Nothing was saved.';
+	  } catch (err) {
+		audioSpectrogramStatusEl.className = 'error';
+		audioSpectrogramStatusEl.textContent = `Unable to save audio crop: ${err?.message || err}`;
+	  } finally {
+		if (audioSpectrogramSaveBtn) audioSpectrogramSaveBtn.disabled = false;
+	  }
 	});
 	
 	audioSpectrogramResetBtn.addEventListener('click', async () => {
