@@ -1725,6 +1725,7 @@
 	    assets: [],
 	    currentIndex: 0,
 	    currentCanvas: null,
+	    renderToken: 0,
 	    mode: 'none',
 	    audioBufferCache: new Map(),
 	    currentSpectrogramCanvas: null,
@@ -8242,7 +8243,7 @@ async function appendCanvasToViewerStage(canvas) {
 	  return cropWrap;
 	}
 
-	async function renderViewerImageAsset(asset) {
+	async function renderViewerImageAsset(asset, renderToken = state.imageViewer.renderToken) {
 	  imageViewerStatusEl.className = 'muted';
 	  imageViewerStatusEl.textContent = '';
 
@@ -8275,11 +8276,10 @@ async function appendCanvasToViewerStage(canvas) {
 		  canvas = cloneCanvas(state.imageViewer.bitplaneXorBaseCanvas);
 		} else {
 		  canvas = await renderImageAssetToCanvas(asset, settings);
-		  if (state.imageViewer.mode === 'bitplane') {
-			state.imageViewer.bitplaneXorBaseCanvas = cloneCanvas(canvas);
-		  }
 		}
 	  }
+
+	  if (renderToken !== state.imageViewer.renderToken || asset !== getCurrentImageViewerAsset()) return;
 
 	  appendCanvasToViewerStage(canvas);
 
@@ -8322,7 +8322,7 @@ async function appendCanvasToViewerStage(canvas) {
 	  imageViewerStatusEl.textContent = '';
 	}
 
-	async function renderViewerVideoAsset(asset) {
+	async function renderViewerVideoAsset(asset, renderToken = state.imageViewer.renderToken) {
 	  if (usesSpectrogramCanvas(asset)) {
 		const { wrap } = buildSpectrogramMediaWrap(asset);
 		imageViewerStageEl.appendChild(wrap);
@@ -8340,10 +8340,9 @@ async function appendCanvasToViewerStage(canvas) {
 			canvas = renderBitplaneWorkingCanvas(state.imageViewer.bitplaneXorBaseCanvas, settings);
 		  } else {
 			canvas = await renderVideoFrameAssetToCanvas(asset, settings, frameTime);
-			if (state.imageViewer.mode === 'bitplane') {
-			  state.imageViewer.bitplaneXorBaseCanvas = cloneCanvas(canvas);
-			}
 		  }
+
+		  if (renderToken !== state.imageViewer.renderToken || asset !== getCurrentImageViewerAsset()) return;
 
 		  appendCanvasToViewerStage(canvas);
 		  setImageViewerInfo(asset, [
@@ -8428,10 +8427,11 @@ async function appendCanvasToViewerStage(canvas) {
 	  const asset = getCurrentImageViewerAsset();
 	  if (!asset) return;
 
+	  const renderToken = ++state.imageViewer.renderToken;
 	  prepareImageViewerRender(asset);
 
 	  if (asset.kind === 'image') {
-		await renderViewerImageAsset(asset);
+		await renderViewerImageAsset(asset, renderToken);
 		return;
 	  }
 
@@ -8442,15 +8442,17 @@ async function appendCanvasToViewerStage(canvas) {
 	  if (asset.kind === 'archive') {
 		renderViewerArchiveAsset(asset);
 	  } else if (asset.kind === 'video' && asset.url) {
-		await renderViewerVideoAsset(asset);
+		await renderViewerVideoAsset(asset, renderToken);
 	  } else if (asset.kind === 'audio' && asset.url) {
+		if (renderToken !== state.imageViewer.renderToken) return;
 		renderViewerAudioAsset(asset);
 	  } else {
+		if (renderToken !== state.imageViewer.renderToken) return;
 		renderViewerTextAsset(asset);
 	  }
 	}
 
-    function openImageViewerByAsset(asset) {
+        function openImageViewerByAsset(asset) {
       syncImageViewerAssets(asset.node?.id || null);
       resetImageViewerControls();
       state.imageViewer.isOpen = true;
