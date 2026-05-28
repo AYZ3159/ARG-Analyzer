@@ -1421,6 +1421,7 @@
                 Channel
                 <select id="imageChannelSelect">
                   <option>Original</option>
+                  <option>Exclude Alpha</option>
                   <option>R</option>
                   <option>G</option>
                   <option>B</option>
@@ -5760,13 +5761,14 @@ function clearMultipartIssueStatus(node) {
 	function describeBitplaneSettings(settings) {
 	  const range = `bits ${settings.startBit}-${settings.endBit}`;
 	  const space = String(settings.renderSpace || 'Color').toLowerCase();
+	  const channelLabel = settings.channel === 'Exclude Alpha' ? 'Original excluding alpha' : settings.channel;
 	  const thresholdLabel = settings.threshold > 0 ? ` threshold ${settings.threshold}` : '';
 	  const transformParts = [];
 	  if (settings.rotateQuarterTurns) transformParts.push(`rotate ${settings.rotateQuarterTurns * 90}°`);
 	  if (settings.mirrorHorizontal) transformParts.push('mirror horizontal');
 	  if (settings.mirrorVertical) transformParts.push('mirror vertical');
 	  const transformLabel = transformParts.length ? ` ${transformParts.join(' ')}` : '';
-	  return `${settings.channel} ${range} ${space}${thresholdLabel}${transformLabel}`;
+	  return `${channelLabel} ${range} ${space}${thresholdLabel}${transformLabel}`;
 	}
 
 	function applyCanvasTransforms(srcCanvas, settings) {
@@ -5802,6 +5804,32 @@ function clearMultipartIssueStatus(node) {
         img.src = url;
       });
     }
+
+	async function loadImageSourceForAsset(asset) {
+	  const bytes = asset?.node?.bytes;
+	  if (bytes?.length && typeof createImageBitmap === 'function') {
+		const blob = new Blob([bytes], { type: asset.mime || 'image/png' });
+		try {
+		  return await createImageBitmap(blob, {
+			premultiplyAlpha: 'none',
+			colorSpaceConversion: 'none'
+		  });
+		} catch (_) {
+		  try {
+			return await createImageBitmap(blob, { premultiplyAlpha: 'none' });
+		  } catch (_) {}
+		}
+	  }
+	  return await loadImageFromUrl(asset.url);
+	}
+
+	function getImageSourceWidth(source) {
+	  return source?.naturalWidth || source?.videoWidth || source?.displayWidth || source?.width || 0;
+	}
+
+	function getImageSourceHeight(source) {
+	  return source?.naturalHeight || source?.videoHeight || source?.displayHeight || source?.height || 0;
+	}
 
 	function stopGifPlayback() {
 	  if (state.imageViewer.gifPlaybackTimer != null) {
@@ -5981,21 +6009,18 @@ function clearMultipartIssueStatus(node) {
 	  await updateImageViewer();
 	}
 
-	function renderSourceCanvasToCanvas(srcCanvas, settings) {
-	  srcCanvas = applyCanvasTransforms(srcCanvas, settings);
-	  const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
-	  const srcImageData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
-	  const src = srcImageData.data;
-
+	function renderRgbaBufferToCanvas(width, height, src, settings) {
 	  const outCanvas = document.createElement('canvas');
-	  outCanvas.width = srcCanvas.width;
-	  outCanvas.height = srcCanvas.height;
+	  outCanvas.width = width;
+	  outCanvas.height = height;
 	  const outCtx = outCanvas.getContext('2d', { willReadFrequently: true });
 
-	  const outImageData = outCtx.createImageData(srcCanvas.width, srcCanvas.height);
+	  const outImageData = outCtx.createImageData(width, height);
 	  const out = outImageData.data;
 
 	  const mask = ((1 << (settings.endBit - settings.startBit + 1)) - 1) << settings.startBit;
+	  const channel = settings.channel || 'Original';
+	  const useOriginalRgb = channel === 'Original' || channel === 'Exclude Alpha';
 
 	  function projectBits(value) {
 		if (!mask) return 0;
@@ -6009,17 +6034,18 @@ function clearMultipartIssueStatus(node) {
 	  }
 
 	  for (let i = 0; i < src.length; i += 4) {
+		const rawA = src[i + 3];
 		const r = applyThreshold(projectBits(src[i]));
 		const g = applyThreshold(projectBits(src[i + 1]));
 		const b = applyThreshold(projectBits(src[i + 2]));
-		const a = applyThreshold(projectBits(src[i + 3]));
+		const a = applyThreshold(projectBits(rawA));
 
 		let outR = 0;
 		let outG = 0;
 		let outB = 0;
 		let outA = 255;
 
-		if (settings.channel === 'Original') {
+		if (useOriginalRgb) {
 		  if (getBitplaneRenderSpaceMode(settings.renderSpace) === 'Color') {
 			outR = r;
 			outG = g;
@@ -6030,17 +6056,18 @@ function clearMultipartIssueStatus(node) {
 			outG = gray;
 			outB = gray;
 		  }
+		  outA = channel === 'Original' ? rawA : 255;
 		} else {
 		  let value = 0;
-		  if (settings.channel === 'R') value = r;
-		  if (settings.channel === 'G') value = g;
-		  if (settings.channel === 'B') value = b;
-		  if (settings.channel === 'A') value = a;
+		  if (channel === 'R') value = r;
+		  if (channel === 'G') value = g;
+		  if (channel === 'B') value = b;
+		  if (channel === 'A') value = a;
 
 		  if (getBitplaneRenderSpaceMode(settings.renderSpace) === 'Color') {
-			if (settings.channel === 'R') outR = value;
-			else if (settings.channel === 'G') outG = value;
-			else if (settings.channel === 'B') outB = value;
+			if (channel === 'R') outR = value;
+			else if (channel === 'G') outG = value;
+			else if (channel === 'B') outB = value;
 			else {
 			  outR = value;
 			  outG = value;
@@ -6069,6 +6096,18 @@ function clearMultipartIssueStatus(node) {
 	  return outCanvas;
 	}
 
+	function renderRawRgbaToCanvas(rawRgba, settings) {
+	  const projected = renderRgbaBufferToCanvas(rawRgba.width, rawRgba.height, rawRgba.data, settings);
+	  return applyCanvasTransforms(projected, settings);
+	}
+
+	function renderSourceCanvasToCanvas(srcCanvas, settings) {
+	  srcCanvas = applyCanvasTransforms(srcCanvas, settings);
+	  const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+	  const srcImageData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
+	  return renderRgbaBufferToCanvas(srcCanvas.width, srcCanvas.height, srcImageData.data, settings);
+	}
+
 	function cloneCanvas(sourceCanvas) {
 	  const canvas = document.createElement('canvas');
 	  canvas.width = sourceCanvas.width;
@@ -6082,14 +6121,180 @@ function clearMultipartIssueStatus(node) {
 	  return renderSourceCanvasToCanvas(cloneCanvas(sourceCanvas), settings);
 	}
 
+	function paethPredictor(a, b, c) {
+	  const p = a + b - c;
+	  const pa = Math.abs(p - a);
+	  const pb = Math.abs(p - b);
+	  const pc = Math.abs(p - c);
+	  if (pa <= pb && pa <= pc) return a;
+	  if (pb <= pc) return b;
+	  return c;
+	}
+
+	async function decodePngRawRgba(bytes) {
+	  if (!bytes?.length || !isPng(bytes)) return null;
+
+	  const pngInfo = parsePngChunks(bytes);
+	  const ihdr = pngInfo.chunks.find(chunk => chunk.type === 'IHDR');
+	  if (!ihdr || ihdr.length < 13) return null;
+
+	  const data = bytes.slice(ihdr.dataStart, ihdr.dataEnd);
+	  const width = readU32BEAt(data, 0);
+	  const height = readU32BEAt(data, 4);
+	  const bitDepth = data[8];
+	  const colorType = data[9];
+	  const compression = data[10];
+	  const filter = data[11];
+	  const interlace = data[12];
+
+	  if (!width || !height || bitDepth !== 8 || compression !== 0 || filter !== 0 || interlace !== 0) {
+		return null;
+	  }
+
+	  const idatChunks = pngInfo.chunks.filter(chunk => chunk.type === 'IDAT');
+	  if (!idatChunks.length) return null;
+
+	  const idatLength = idatChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+	  const compressed = new Uint8Array(idatLength);
+	  let cursor = 0;
+	  for (const chunk of idatChunks) {
+		compressed.set(bytes.slice(chunk.dataStart, chunk.dataEnd), cursor);
+		cursor += chunk.length;
+	  }
+
+	  let channels;
+	  if (colorType === 0) channels = 1;        // grayscale
+	  else if (colorType === 2) channels = 3;   // RGB
+	  else if (colorType === 3) channels = 1;   // indexed palette
+	  else if (colorType === 4) channels = 2;   // grayscale + alpha
+	  else if (colorType === 6) channels = 4;   // RGBA
+	  else return null;
+
+	  const inflated = await inflateZlibBytes(compressed);
+	  const bytesPerPixel = channels;
+	  const scanlineLength = width * channels;
+	  const expectedLength = (scanlineLength + 1) * height;
+	  if (inflated.length < expectedLength) return null;
+
+	  let palette = null;
+	  let paletteAlpha = null;
+	  if (colorType === 3) {
+		const plte = pngInfo.chunks.find(chunk => chunk.type === 'PLTE');
+		if (!plte) return null;
+		const plteData = bytes.slice(plte.dataStart, plte.dataEnd);
+		palette = [];
+		for (let i = 0; i + 2 < plteData.length; i += 3) {
+		  palette.push([plteData[i], plteData[i + 1], plteData[i + 2]]);
+		}
+		const trns = pngInfo.chunks.find(chunk => chunk.type === 'tRNS');
+		paletteAlpha = trns ? bytes.slice(trns.dataStart, trns.dataEnd) : null;
+	  }
+
+	  let transparentRgb = null;
+	  let transparentGray = null;
+	  if (colorType === 2) {
+		const trns = pngInfo.chunks.find(chunk => chunk.type === 'tRNS');
+		if (trns && trns.length >= 6) {
+		  const t = bytes.slice(trns.dataStart, trns.dataEnd);
+		  transparentRgb = [(t[0] << 8) | t[1], (t[2] << 8) | t[3], (t[4] << 8) | t[5]];
+		}
+	  } else if (colorType === 0) {
+		const trns = pngInfo.chunks.find(chunk => chunk.type === 'tRNS');
+		if (trns && trns.length >= 2) {
+		  const t = bytes.slice(trns.dataStart, trns.dataEnd);
+		  transparentGray = (t[0] << 8) | t[1];
+		}
+	  }
+
+	  const raw = new Uint8Array(scanlineLength * height);
+	  let inOffset = 0;
+	  let outOffset = 0;
+	  const prev = new Uint8Array(scanlineLength);
+	  const cur = new Uint8Array(scanlineLength);
+
+	  for (let y = 0; y < height; y++) {
+		const filterType = inflated[inOffset++];
+		cur.set(inflated.subarray(inOffset, inOffset + scanlineLength));
+		inOffset += scanlineLength;
+
+		for (let x = 0; x < scanlineLength; x++) {
+		  const left = x >= bytesPerPixel ? cur[x - bytesPerPixel] : 0;
+		  const up = prev[x] || 0;
+		  const upLeft = x >= bytesPerPixel ? prev[x - bytesPerPixel] : 0;
+
+		  if (filterType === 1) cur[x] = (cur[x] + left) & 255;
+		  else if (filterType === 2) cur[x] = (cur[x] + up) & 255;
+		  else if (filterType === 3) cur[x] = (cur[x] + Math.floor((left + up) / 2)) & 255;
+		  else if (filterType === 4) cur[x] = (cur[x] + paethPredictor(left, up, upLeft)) & 255;
+		  else if (filterType !== 0) return null;
+		}
+
+		raw.set(cur, outOffset);
+		outOffset += scanlineLength;
+		prev.set(cur);
+	  }
+
+	  const out = new Uint8ClampedArray(width * height * 4);
+
+	  let p = 0;
+	  for (let i = 0; i < out.length; i += 4) {
+		if (colorType === 6) {
+		  out[i] = raw[p++];
+		  out[i + 1] = raw[p++];
+		  out[i + 2] = raw[p++];
+		  out[i + 3] = raw[p++];
+		} else if (colorType === 2) {
+		  const r = raw[p++];
+		  const g = raw[p++];
+		  const b = raw[p++];
+		  out[i] = r;
+		  out[i + 1] = g;
+		  out[i + 2] = b;
+		  out[i + 3] = transparentRgb && r === transparentRgb[0] && g === transparentRgb[1] && b === transparentRgb[2] ? 0 : 255;
+		} else if (colorType === 4) {
+		  const gray = raw[p++];
+		  out[i] = gray;
+		  out[i + 1] = gray;
+		  out[i + 2] = gray;
+		  out[i + 3] = raw[p++];
+		} else if (colorType === 0) {
+		  const gray = raw[p++];
+		  out[i] = gray;
+		  out[i + 1] = gray;
+		  out[i + 2] = gray;
+		  out[i + 3] = transparentGray != null && gray === transparentGray ? 0 : 255;
+		} else if (colorType === 3) {
+		  const index = raw[p++];
+		  const entry = palette[index] || [0, 0, 0];
+		  out[i] = entry[0];
+		  out[i + 1] = entry[1];
+		  out[i + 2] = entry[2];
+		  out[i + 3] = paletteAlpha && index < paletteAlpha.length ? paletteAlpha[index] : 255;
+		}
+	  }
+
+	  return { width, height, data: out };
+	}
+
     async function renderImageAssetToCanvas(asset, settings) {
-      const img = await loadImageFromUrl(asset.url);
+      if (asset?.mime === 'image/png' && asset?.node?.bytes?.length) {
+        try {
+          const rawRgba = await decodePngRawRgba(asset.node.bytes);
+          if (rawRgba) return renderRawRgbaToCanvas(rawRgba, settings);
+        } catch (_) {}
+      }
+
+      const img = await loadImageSourceForAsset(asset);
 
       const srcCanvas = document.createElement('canvas');
-      srcCanvas.width = img.naturalWidth || img.width;
-      srcCanvas.height = img.naturalHeight || img.height;
+      srcCanvas.width = getImageSourceWidth(img);
+      srcCanvas.height = getImageSourceHeight(img);
       const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+      srcCtx.clearRect(0, 0, srcCanvas.width, srcCanvas.height);
+      srcCtx.globalCompositeOperation = 'copy';
       srcCtx.drawImage(img, 0, 0);
+      srcCtx.globalCompositeOperation = 'source-over';
+      if (typeof img.close === 'function') img.close();
 
       return renderSourceCanvasToCanvas(srcCanvas, settings);
     }
@@ -7203,15 +7408,18 @@ function clearMultipartIssueStatus(node) {
 	}
 
 	async function renderAssetImageToSizedCanvas(asset, width, height) {
-	  if (!asset?.url) throw new Error('Selected image source is unavailable.');
-	  const img = await loadImageFromUrl(asset.url);
+	  if (!asset?.url && !asset?.node?.bytes?.length) throw new Error('Selected image source is unavailable.');
+	  const img = await loadImageSourceForAsset(asset);
 	  const canvas = document.createElement('canvas');
 	  canvas.width = width;
 	  canvas.height = height;
 	  const ctx = canvas.getContext('2d', { willReadFrequently: true });
 	  ctx.imageSmoothingEnabled = false;
 	  ctx.clearRect(0, 0, width, height);
+	  ctx.globalCompositeOperation = 'copy';
 	  ctx.drawImage(img, 0, 0, width, height);
+	  ctx.globalCompositeOperation = 'source-over';
+	  if (typeof img.close === 'function') img.close();
 	  return canvas;
 	}
 
