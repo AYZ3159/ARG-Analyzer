@@ -634,6 +634,66 @@
       border-color: transparent;
     }
 
+    .info-icon-btn {
+      background: var(--panel-2);
+      color: #ffffff;
+      border: 1px solid var(--border);
+      font-weight: 800;
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    .info-icon-btn.active {
+      background: var(--accent);
+      color: #08101f;
+      border-color: transparent;
+      box-shadow: none;
+    }
+
+    .asset-info-section {
+      display: grid;
+      gap: 8px;
+    }
+
+    .asset-info-content {
+      display: grid;
+      gap: 10px;
+      white-space: pre-wrap;
+    }
+
+    .asset-info-block {
+      display: grid;
+      gap: 3px;
+      padding: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-2);
+    }
+
+    .asset-info-block-title {
+      color: var(--text);
+      font-weight: 700;
+      margin-bottom: 2px;
+    }
+
+    .asset-info-row {
+      display: grid;
+      grid-template-columns: minmax(86px, auto) minmax(0, 1fr);
+      gap: 8px;
+      align-items: baseline;
+      min-width: 0;
+    }
+
+    .asset-info-key {
+      color: var(--muted);
+    }
+
+    .asset-info-value {
+      color: var(--text);
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
     .icon-btn svg {
       width: 20px;
       height: 20px;
@@ -1386,6 +1446,14 @@
 		  </svg>
 		  </button>
 
+          <button
+            id="assetInfoModeBtn"
+            class="icon-btn info-icon-btn"
+            type="button"
+            title="Asset Info"
+            aria-label="Asset Info"
+          >i</button>
+
         </div>
 
         <button id="imageCloseBtn" type="button">Close</button>
@@ -1396,6 +1464,11 @@
 
         <div class="image-viewer-sidebar">
           <div id="imageViewerInfo" class="mono muted"></div>
+
+          <div id="assetInfoSection" class="image-viewer-section asset-info-section" hidden>
+            <div id="assetInfoContent" class="asset-info-content"></div>
+            <div id="assetInfoHashStatus" class="muted"></div>
+          </div>
 
           <div id="gifFrameSection" class="image-viewer-section gif-frame-section" hidden>
             <div id="gifFrameStatus" class="muted">GIF frame controls unavailable.</div>
@@ -1727,6 +1800,7 @@
 	    currentIndex: 0,
 	    currentCanvas: null,
 	    renderToken: 0,
+	    infoHashToken: 0,
 	    mode: 'none',
 	    audioBufferCache: new Map(),
 	    currentSpectrogramCanvas: null,
@@ -1860,6 +1934,10 @@
 	const textReplaceAllBtn = document.getElementById('textReplaceAllBtn');
 	const textTransformTypeSelect = document.getElementById('textTransformTypeSelect');
 	const binaryToolsBtn = document.getElementById('binaryToolsBtn');
+	const assetInfoModeBtn = document.getElementById('assetInfoModeBtn');
+	const assetInfoSection = document.getElementById('assetInfoSection');
+	const assetInfoContentEl = document.getElementById('assetInfoContent');
+	const assetInfoHashStatusEl = document.getElementById('assetInfoHashStatus');
 	const binaryToolsSection = document.getElementById('binaryToolsSection');
 	const textXorAssetSelect = document.getElementById('textXorAssetSelect');
 	const textXorApplyBtn = document.getElementById('textXorApplyBtn');
@@ -2098,7 +2176,8 @@
 		  index,
 		  name: node.meta?.fileName || node.label || `Source_${index + 1}`,
 		  bytes_b64: bytesToBase64(node.bytes),
-		  size: node.size ?? node.bytes.length
+		  size: node.size ?? node.bytes.length,
+		  meta: node.meta || {}
 		})),
 		derivedAssets
 	  };
@@ -2240,8 +2319,16 @@
 		const bytes = entry?.bytes_b64 ? decodeBase64ToUint8Array(entry.bytes_b64) : null;
 		if (!bytes?.length) continue;
 		const name = entry.name || `Source_${i + 1}`;
-		const file = new File([bytes], name);
+		const file = new File([bytes], name, { lastModified: Number.isFinite(Date.parse(entry?.meta?.timestamps?.modified || '')) ? Date.parse(entry.meta.timestamps.modified) : Date.now() });
 		const { sessionNode, bytes: srcBytes } = await buildSessionInputNodeFromFile(file);
+		if (entry?.meta) {
+		  sessionNode.meta = {
+			...sessionNode.meta,
+			...entry.meta,
+			fileName: entry.meta.fileName || sessionNode.meta.fileName || name,
+			originalSize: entry.meta.originalSize || sessionNode.meta.originalSize || bytes.length
+		  };
+		}
 		sessionRoot.children.push(sessionNode);
 		if (i === 0) {
 		  state.sourceFile = file;
@@ -3133,6 +3220,61 @@
 	  return { archiveMeta, entries };
 	}
 
+	function normalizeInfoFieldName(name) {
+	  return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+	}
+
+	function firstPresentField(record, names) {
+	  if (!record) return null;
+	  const wanted = new Set((names || []).map(normalizeInfoFieldName));
+	  for (const [key, value] of Object.entries(record)) {
+		if (!wanted.has(normalizeInfoFieldName(key))) continue;
+		const text = String(value ?? '').trim();
+		if (text) return text;
+	  }
+	  return null;
+	}
+
+	function extractArchiveTimestampsFromSlt(record) {
+	  return {
+		created: firstPresentField(record, [
+		  'Created',
+		  'Created Time',
+		  'Creation Time',
+		  'CreationTime',
+		  'Create Time',
+		  'CreateTime',
+		  'Create Date',
+		  'Creation Date',
+		  'CTime',
+		  'C Time'
+		]),
+		modified: firstPresentField(record, [
+		  'Modified',
+		  'Modified Time',
+		  'Modification Time',
+		  'ModificationTime',
+		  'Modification Date',
+		  'Last Modified',
+		  'LastModified',
+		  'Last Write Time',
+		  'LastWriteTime',
+		  'Write Time',
+		  'MTime',
+		  'M Time'
+		])
+	  };
+	}
+
+	function normalizeArchiveEntryLookupPath(path) {
+	  let value = String(path || '').replace(/\\/g, '/').trim();
+	  value = value.replace(/^\/out(?:\/|$)/i, '');
+	  value = value.replace(/^\/+/, '');
+	  value = value.replace(/^\.\//, '');
+	  value = value.replace(/\/+$/g, '');
+	  return value;
+	}
+
 	function isArchiveMultipart(archiveMeta, logsText) {
 	  return String(archiveMeta?.['Multivolume'] || '').trim() === '+' || /missing volume\s*:/i.test(String(logsText || ''));
 	}
@@ -3183,8 +3325,8 @@
 		fs.writeFile(inPath, bytes);
 
 		const listArgs = password
-		  ? ['l', `-p${password}`, '-slt', '-bd', '-bso1', '-bse1', '-bsp1', inPath]
-		  : ['l', '-slt', '-bd', '-bso1', '-bse1', '-bsp1', inPath];
+		  ? ['l', `-p${password}`, '-slt', '-sns', '-bd', '-bso1', '-bse1', '-bsp1', inPath]
+		  : ['l', '-slt', '-sns', '-bd', '-bso1', '-bse1', '-bsp1', inPath];
 
 		module.callMain(listArgs);
 		listOk = true;
@@ -3209,8 +3351,8 @@
 		try { fs.mkdir(outDir); } catch (_) {}
 
 		const extractArgs = password
-		  ? ['x', `-p${password}`, '-y', '-bd', '-bso1', '-bse1', '-bsp1', `-o${outDir}`, inPath]
-		  : ['x', '-y', '-bd', '-bso1', '-bse1', '-bsp1', `-o${outDir}`, inPath];
+		  ? ['x', `-p${password}`, '-y', '-sns', '-bd', '-bso1', '-bse1', '-bsp1', `-o${outDir}`, inPath]
+		  : ['x', '-y', '-sns', '-bd', '-bso1', '-bse1', '-bsp1', `-o${outDir}`, inPath];
 
 		module.callMain(extractArgs);
 		extractOk = true;
@@ -3448,7 +3590,11 @@
 		bytes,
 		meta: {
 		  fileName: file.name,
-		  originalSize: bytes.length
+		  originalSize: bytes.length,
+		  timestamps: {
+			added: new Date().toISOString(),
+			modified: Number.isFinite(file.lastModified) && file.lastModified > 0 ? new Date(file.lastModified).toISOString() : null
+		  }
 		}
 	  });
 
@@ -3858,8 +4004,8 @@ async function inspectMultipartArchiveSetWithJs7z(nodes, archiveHint, password =
 		}
 		const inPath = getMultipartRarEntryPath(0);
 		const listArgs = password
-		  ? ['l', `-p${password}`, '-slt', '-bd', '-bso1', '-bse1', '-bsp1', inPath]
-		  : ['l', '-slt', '-bd', '-bso1', '-bse1', '-bsp1', inPath];
+		  ? ['l', `-p${password}`, '-slt', '-sns', '-bd', '-bso1', '-bse1', '-bsp1', inPath]
+		  : ['l', '-slt', '-sns', '-bd', '-bso1', '-bse1', '-bsp1', inPath];
 		module.callMain(listArgs);
 		listOk = true;
 		runner.flush();
@@ -3883,8 +4029,8 @@ async function inspectMultipartArchiveSetWithJs7z(nodes, archiveHint, password =
 		try { fs.mkdir(outDir); } catch (_) {}
 		const inPath = getMultipartRarEntryPath(0);
 		const extractArgs = password
-		  ? ['x', `-p${password}`, '-y', '-bd', '-bso1', '-bse1', '-bsp1', `-o${outDir}`, inPath]
-		  : ['x', '-y', '-bd', '-bso1', '-bse1', '-bsp1', `-o${outDir}`, inPath];
+		  ? ['x', `-p${password}`, '-y', '-sns', '-bd', '-bso1', '-bse1', '-bsp1', `-o${outDir}`, inPath]
+		  : ['x', '-y', '-sns', '-bd', '-bso1', '-bse1', '-bsp1', `-o${outDir}`, inPath];
 		module.callMain(extractArgs);
 		extractOk = true;
 		runner.flush();
@@ -4160,14 +4306,24 @@ function clearMultipartIssueStatus(node) {
 
 	  const sltByPath = new Map();
 	  for (const rec of result.sltEntries || []) {
-		if (rec && rec.Path) sltByPath.set(rec.Path, rec);
+		if (!rec || !rec.Path) continue;
+		const rawPath = String(rec.Path);
+		const normalizedPath = normalizeArchiveEntryLookupPath(rawPath);
+		if (rawPath) sltByPath.set(rawPath, rec);
+		if (normalizedPath) sltByPath.set(normalizedPath, rec);
 	  }
 
 	  for (const entry of result.entries) {
 		if (entry.isDir) continue;
 
 		const sniffed = sniffFileTypeFromBytes(entry.bytes);
-		const sltMeta = sltByPath.get(entry.path) || null;
+		const normalizedEntryPath = normalizeArchiveEntryLookupPath(entry.path);
+		const sltMeta =
+		  sltByPath.get(entry.path) ||
+		  sltByPath.get(normalizedEntryPath) ||
+		  sltByPath.get(entry.name) ||
+		  null;
+		const archiveTimestamps = extractArchiveTimestampsFromSlt(sltMeta);
 
 		const normalizedLabel = applyDetectedExtension(entry.name, sniffed);
 		const normalizedPath = applyDetectedExtension(entry.path, sniffed);
@@ -4189,7 +4345,8 @@ function clearMultipartIssueStatus(node) {
 			originalArchivePath: entry.path,
 			isAdsLike: entry.path.includes(':'),
 			sniffed,
-			slt: sltMeta
+			slt: sltMeta,
+			timestamps: archiveTimestamps
 		  }
 		});
 
@@ -5663,14 +5820,18 @@ function clearMultipartIssueStatus(node) {
 	  const isBitplane = mode === 'bitplane';
 	  const isScan = mode === 'scan';
 	  const isSpectrogram = mode === 'spectrogram';
+	  const isInfo = mode === 'info';
 
 	  imageBitplaneSection.hidden = !isBitplane;
 	  imageScanSection.hidden = !isScan;
 	  audioSpectrogramSection.hidden = !isSpectrogram;
+	  if (assetInfoSection) assetInfoSection.hidden = !isInfo;
 
 	  imageModeBitplaneBtn.classList.toggle('active', isBitplane);
 	  imageModeScanBtn.classList.toggle('active', isScan);
 	  audioModeSpectrogramBtn.classList.toggle('active', isSpectrogram);
+	  if (assetInfoModeBtn) assetInfoModeBtn.classList.toggle('active', isInfo);
+	  if (!isInfo) state.imageViewer.infoHashToken++;
 	}
 
 	function setBinaryToolsOpen(nextOpen) {
@@ -7583,6 +7744,200 @@ function clearMultipartIssueStatus(node) {
 	  imageViewerInfoEl.textContent = buildAssetInfoLines(asset, extraLines).join('\n');
 	}
 
+	function clearElementChildren(el) {
+	  if (!el) return;
+	  while (el.firstChild) el.removeChild(el.firstChild);
+	}
+
+	function appendInfoBlock(title, rows) {
+	  if (!assetInfoContentEl) return;
+	  const block = document.createElement('div');
+	  block.className = 'asset-info-block';
+
+	  const heading = document.createElement('div');
+	  heading.className = 'asset-info-block-title';
+	  heading.textContent = title;
+	  block.appendChild(heading);
+
+	  for (const [key, value] of rows) {
+		const row = document.createElement('div');
+		row.className = 'asset-info-row';
+		const keyEl = document.createElement('div');
+		keyEl.className = 'asset-info-key';
+		keyEl.textContent = key;
+		const valueEl = document.createElement('div');
+		valueEl.className = 'asset-info-value';
+		valueEl.textContent = value == null || value === '' ? '—' : String(value);
+		row.appendChild(keyEl);
+		row.appendChild(valueEl);
+		block.appendChild(row);
+	  }
+
+	  assetInfoContentEl.appendChild(block);
+	}
+
+	function stripTimestampMilliseconds(value) {
+	  const text = String(value == null ? '' : value).trim();
+	  if (!text) return '';
+	  return text.replace(/(\d{1,2}:\d{2}:\d{2})\.\d+/g, '$1');
+	}
+
+	function formatInfoTimestamp(value) {
+	  if (value == null || value === '') return '—';
+	  if (typeof value === 'number' && Number.isFinite(value)) {
+	    return stripTimestampMilliseconds(new Date(value).toISOString());
+	  }
+	  return stripTimestampMilliseconds(value);
+	}
+
+	function firstTruthyTimestamp(...values) {
+	  for (const value of values) {
+		if (value == null) continue;
+		const text = String(value).trim();
+		if (text) return text;
+	  }
+	  return null;
+	}
+
+	function getNodeTimestampBundle(node) {
+	  if (!node) return { created: null, modified: null, added: null };
+	  const meta = node.meta || {};
+	  const explicit = meta.timestamps || {};
+	  const infoExplicit = meta.info?.timestamps || {};
+	  const sltTimestamps = extractArchiveTimestampsFromSlt(meta.slt || null);
+	  return {
+		created: firstTruthyTimestamp(explicit.created, infoExplicit.created, sltTimestamps.created),
+		modified: firstTruthyTimestamp(explicit.modified, infoExplicit.modified, sltTimestamps.modified),
+		added: firstTruthyTimestamp(explicit.added, infoExplicit.added, meta.addedAt)
+	  };
+	}
+
+	function getAssetInfoTimestamps(asset) {
+	  const node = asset?.node || null;
+	  const own = getNodeTimestampBundle(node);
+	  const source = getSessionInputAncestor(node);
+	  const sourceTimestamps = source && source !== node ? getNodeTimestampBundle(source) : {};
+	  return {
+		created: own.created,
+		modified: firstTruthyTimestamp(own.modified, sourceTimestamps.modified),
+		added: firstTruthyTimestamp(own.added, sourceTimestamps.added)
+	  };
+	}
+
+	function ensureNodeInfoMeta(node) {
+	  if (!node.meta) node.meta = {};
+	  if (!node.meta.info) node.meta.info = {};
+	  return node.meta.info;
+	}
+
+	function parseJs7zHashOutput(text) {
+	  const output = String(text || '');
+	  const find = pattern => {
+		const match = output.match(pattern);
+		return match ? match[1].trim() : null;
+	  };
+	  return {
+		crc32: find(/CRC32\s+for data:\s*([0-9A-Fa-f]+)/),
+		md5: find(/MD5\s+for data:\s*([0-9A-Fa-f]+)/),
+		sha1: find(/SHA1\s+for data:\s*([0-9A-Fa-f]+)/)
+	  };
+	}
+
+	async function computeNodeHashesWithJs7z(node) {
+	  if (!node?.bytes?.length) throw new Error('No node bytes available to hash.');
+	  if (typeof JS7z !== 'function') throw new Error('JS7z is unavailable.');
+	  const logs = [];
+	  const runner = await createJs7zInstance(logs);
+	  const fs = runner.module.FS;
+	  const inputPath = '/hash_input.bin';
+	  fs.writeFile(inputPath, node.bytes);
+	  try {
+		runner.module.callMain(['h', '-scrc*', '-bd', '-bso1', '-bse1', '-bsp1', inputPath]);
+	  } finally {
+		runner.flush();
+	  }
+	  const parsed = parseJs7zHashOutput(logs.join('\n'));
+	  if (!parsed.crc32 && !parsed.md5 && !parsed.sha1) throw new Error('JS7z did not return hash values.');
+	  return {
+		crc32: parsed.crc32 || null,
+		md5: parsed.md5 || null,
+		sha1: parsed.sha1 || null,
+		computedAt: new Date().toISOString()
+	  };
+	}
+
+	const assetInfoHashRequests = new Map();
+
+	async function ensureAssetInfoHashes(asset) {
+	  const node = asset?.node || null;
+	  if (!node?.bytes?.length) return null;
+	  const info = ensureNodeInfoMeta(node);
+	  if (info.hashes?.crc32 && info.hashes?.md5 && info.hashes?.sha1) return info.hashes;
+
+	  const key = node.id || asset.nodeId || asset.id || asset.path || asset.label || Math.random().toString(36);
+	  if (assetInfoHashRequests.has(key)) return assetInfoHashRequests.get(key);
+
+	  const request = computeNodeHashesWithJs7z(node)
+		.then(hashes => {
+		  const nextInfo = ensureNodeInfoMeta(node);
+		  nextInfo.hashes = hashes;
+		  return hashes;
+		})
+		.finally(() => assetInfoHashRequests.delete(key));
+
+	  assetInfoHashRequests.set(key, request);
+	  return request;
+	}
+
+	function renderAssetInfoPanel(asset, statusText = '') {
+	  if (!assetInfoContentEl || !assetInfoHashStatusEl) return;
+	  clearElementChildren(assetInfoContentEl);
+	  const node = asset?.node || null;
+	  const timestamps = getAssetInfoTimestamps(asset);
+	  const hashes = node?.meta?.info?.hashes || {};
+
+	  appendInfoBlock('File', [
+		['Name', asset?.label || node?.label || '(unnamed)'],
+		['Kind', asset?.kind || node?.kind || 'unknown'],
+		['MIME', asset?.mime || node?.mime || '—'],
+		['Size', formatByteCount(asset?.size ?? node?.size ?? node?.bytes?.length)],
+		['Path', asset?.path || node?.path || '—'],
+		['Role', node?.role || '—']
+	  ]);
+
+	  appendInfoBlock('Timestamps', [
+		['Created', formatInfoTimestamp(timestamps.created)],
+		['Modified', formatInfoTimestamp(timestamps.modified)],
+		['Added', formatInfoTimestamp(timestamps.added)]
+	  ]);
+
+	  appendInfoBlock('Hashes', [
+		['CRC-32', hashes.crc32 || '—'],
+		['MD5', hashes.md5 || '—'],
+		['SHA-1', hashes.sha1 || '—']
+	  ]);
+
+	  assetInfoHashStatusEl.className = statusText && /^Unable/i.test(statusText) ? 'error' : 'muted';
+	  assetInfoHashStatusEl.textContent = statusText;
+	}
+
+	async function updateAssetInfoPanel(asset) {
+	  if (!asset || state.imageViewer.mode !== 'info') return;
+	  const token = ++state.imageViewer.infoHashToken;
+	  const hasCached = !!asset.node?.meta?.info?.hashes;
+	  renderAssetInfoPanel(asset, hasCached ? '' : (asset.node?.bytes?.length ? 'Calculating hashes...' : 'No bytes available for hashing.'));
+
+	  if (!asset.node?.bytes?.length || hasCached) return;
+	  try {
+		await ensureAssetInfoHashes(asset);
+		if (token !== state.imageViewer.infoHashToken || state.imageViewer.mode !== 'info') return;
+		renderAssetInfoPanel(asset, 'Hashes calculated and cached.');
+	  } catch (err) {
+		if (token !== state.imageViewer.infoHashToken || state.imageViewer.mode !== 'info') return;
+		renderAssetInfoPanel(asset, `Unable to calculate hashes: ${err?.message || err}`);
+	  }
+	}
+
 	function buildEditedTextLabel(label) {
 	  return `${stripExtension(label, 'Text')}_Edit_${buildTimestamp()}.txt`;
 	}
@@ -8124,6 +8479,7 @@ function updateImageViewerToolVisibility(asset) {
 	  imageModeBitplaneBtn.hidden = !bitplaneCapable;
 	  imageModeScanBtn.hidden = !showScan;
 	  audioModeSpectrogramBtn.hidden = !spectrogramCapable;
+	  if (assetInfoModeBtn) assetInfoModeBtn.hidden = !asset;
 	  updateTextEditSection(asset);
 	  if (videoFrameSection) videoFrameSection.hidden = !(asset && asset.kind === 'video');
 
@@ -8637,6 +8993,9 @@ async function appendCanvasToViewerStage(canvas) {
 
 	  const renderToken = ++state.imageViewer.renderToken;
 	  prepareImageViewerRender(asset);
+	  if (state.imageViewer.mode === 'info') {
+		updateAssetInfoPanel(asset);
+	  }
 
 	  if (asset.kind === 'image') {
 		await renderViewerImageAsset(asset, renderToken);
@@ -8956,6 +9315,13 @@ async function appendCanvasToViewerStage(canvas) {
 	  state.imageViewer.textEdit.draftText = getAssetEditableTextValue(asset);
 	  imageViewerStatusEl.className = 'muted';
 	  imageViewerStatusEl.textContent = state.imageViewer.textEdit.binaryView ? 'Binary View enabled.' : '';
+	  await updateImageViewer();
+	});
+
+	if (assetInfoModeBtn) assetInfoModeBtn.addEventListener('click', async () => {
+	  setBinaryToolsOpen(false);
+	  const nextMode = state.imageViewer.mode === 'info' ? 'none' : 'info';
+	  setImageViewerMode(nextMode);
 	  await updateImageViewer();
 	});
 
