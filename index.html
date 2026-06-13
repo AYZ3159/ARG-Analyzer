@@ -700,6 +700,11 @@
       display: block;
     }
 
+    .audio-tools-icon {
+      width: 24px !important;
+      height: 24px !important;
+    }
+
     .image-viewer-section[hidden] {
       display: none !important;
     }
@@ -903,6 +908,12 @@
 
 	.image-viewer-stage.text-stage {
 	  background: #ffffff;
+	}
+
+	.image-viewer-stage.ascii-stage {
+	  align-items: flex-start;
+	  justify-content: flex-start;
+	  padding: 0;
 	}
 
 	
@@ -1433,6 +1444,24 @@
 		  </svg>
 		  </button>
 
+
+		  <button
+		  id="audioToolsBtn"
+		  class="icon-btn"
+		  type="button"
+		  title="Audio Tools"
+		  aria-label="Audio Tools"
+		  hidden
+		  >
+		  <svg class="audio-tools-icon" viewBox="0 0 24 24" aria-hidden="true">
+			<rect x="7" y="4" width="11" height="3" rx="0.7" fill="currentColor"></rect>
+			<rect x="7" y="5" width="3" height="12" fill="currentColor"></rect>
+			<rect x="15" y="5" width="3" height="10" fill="currentColor"></rect>
+			<ellipse cx="7" cy="17" rx="4" ry="3.1" fill="currentColor"></ellipse>
+			<ellipse cx="15" cy="15" rx="4" ry="3.1" fill="currentColor"></ellipse>
+		  </svg>
+		  </button>
+
 		  <button
 		  id="binaryToolsBtn"
 		  class="icon-btn"
@@ -1669,6 +1698,20 @@
 		  <div id="audioSpectrogramStatus" class="muted">No spectrogram rendered yet.</div>
 		</div>
 
+
+		<div id="audioToolsSection" class="image-viewer-section" hidden>
+		  <div class="text-edit-grid">
+			<div class="text-binary-tool-block">
+			  <div class="text-binary-tool-label">Sample XOR With</div>
+			  <div class="text-binary-tool-row">
+				<select id="audioXorAssetSelect"></select>
+				<button id="audioXorApplyBtn" type="button" disabled>Apply XOR</button>
+				<button id="audioXorSaveBtn" type="button" disabled>Save</button>
+			  </div>
+			</div>
+			<div id="audioToolsStatus" class="muted"></div>
+		  </div>
+		</div>
 		<div id="textEditSection" class="image-viewer-section" hidden>
 		  <div class="text-edit-tools">
 			<div class="image-viewer-actions">
@@ -1724,6 +1767,7 @@
 		  <div class="image-viewer-actions">
 			<button id="textBinaryViewBtn" type="button">Binary View</button>
 			<button id="textEvaluateFileBtn" type="button">Evaluate as File</button>
+			<button id="textSaveImageBtn" type="button" hidden>Save as Image</button>
 		  </div>
 		</div>
 
@@ -1829,6 +1873,18 @@
 	      playheadEl: null,
 	      playheadRaf: null
 	    },
+	    audioXor: {
+	      assetKey: null,
+	      sourceNodeId: null,
+	      baseLabel: '',
+	      bytes: null,
+	      url: null,
+	      sampleRate: null,
+	      channels: null,
+	      frames: null,
+	      samplePatterns: null,
+	      operations: []
+	    },
 	    textEdit: {
 	      nodeId: null,
 	      isEditing: false,
@@ -1933,11 +1989,17 @@
 	const textReplaceCurrentBtn = document.getElementById('textReplaceCurrentBtn');
 	const textReplaceAllBtn = document.getElementById('textReplaceAllBtn');
 	const textTransformTypeSelect = document.getElementById('textTransformTypeSelect');
+	const audioToolsBtn = document.getElementById('audioToolsBtn');
 	const binaryToolsBtn = document.getElementById('binaryToolsBtn');
 	const assetInfoModeBtn = document.getElementById('assetInfoModeBtn');
 	const assetInfoSection = document.getElementById('assetInfoSection');
 	const assetInfoContentEl = document.getElementById('assetInfoContent');
 	const assetInfoHashStatusEl = document.getElementById('assetInfoHashStatus');
+	const audioToolsSection = document.getElementById('audioToolsSection');
+	const audioXorAssetSelect = document.getElementById('audioXorAssetSelect');
+	const audioXorApplyBtn = document.getElementById('audioXorApplyBtn');
+	const audioXorSaveBtn = document.getElementById('audioXorSaveBtn');
+	const audioToolsStatusEl = document.getElementById('audioToolsStatus');
 	const binaryToolsSection = document.getElementById('binaryToolsSection');
 	const textXorAssetSelect = document.getElementById('textXorAssetSelect');
 	const textXorApplyBtn = document.getElementById('textXorApplyBtn');
@@ -1950,6 +2012,7 @@
 	const textFileSection = document.getElementById('textFileSection');
 	const textBinaryViewBtn = document.getElementById('textBinaryViewBtn');
 	const textEvaluateFileBtn = document.getElementById('textEvaluateFileBtn');
+	const textSaveImageBtn = document.getElementById('textSaveImageBtn');
 
     let base64UploadAppendMode = true;
 
@@ -2217,19 +2280,61 @@
 	  return bytes && bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
 	}
 
+	function isValidArgSessionPayload(payload) {
+	  return !!(payload && payload.type === 'arg-analyzer-session' && (Array.isArray(payload.sources) || payload.catalog));
+	}
+
+	function summarizeArgSessionPayload(payload) {
+	  if (!isValidArgSessionPayload(payload)) return null;
+	  const sourceCount = Array.isArray(payload.sources)
+		? payload.sources.length
+		: (payload.catalog?.children?.length || 0);
+	  const derivedAssetCount = Array.isArray(payload.derivedAssets) ? payload.derivedAssets.length : 0;
+	  return {
+		sessionName: payload.sessionName || 'ARG_Session',
+		sourceCount,
+		derivedAssetCount,
+		payloadVersion: payload.version || null
+	  };
+	}
+
+	async function readArgSessionPayloadFromBytes(bytes) {
+	  if (!looksLikeGzipBytes(bytes)) return null;
+	  try {
+		const payloadBytes = await gzipBytes(bytes, 'decode');
+		const raw = new TextDecoder('utf-8', { fatal: false }).decode(payloadBytes);
+		const payload = JSON.parse(raw);
+		return isValidArgSessionPayload(payload) ? payload : null;
+	  } catch (_) {
+		return null;
+	  }
+	}
+
+	async function getArgSessionInfoFromBytes(bytes) {
+	  const payload = await readArgSessionPayloadFromBytes(bytes);
+	  return summarizeArgSessionPayload(payload);
+	}
+
 	async function readSessionPayloadFromFile(file) {
 	  const bytes = new Uint8Array(await file.arrayBuffer());
 	  if (!looksLikeGzipBytes(bytes)) {
 		throw new Error('Session file is not gzip-compressed.');
 	  }
-	  const payloadBytes = await gzipBytes(bytes, 'decode');
-	  const raw = new TextDecoder('utf-8', { fatal: false }).decode(payloadBytes);
-	  return JSON.parse(raw);
+	  const payload = await readArgSessionPayloadFromBytes(bytes);
+	  if (!payload) {
+		throw new Error('This file is not a valid ARG Analyzer session.');
+	  }
+	  return payload;
 	}
 
 	async function isLikelySessionFile(file) {
 	  if (!file) return false;
-	  return String(file.name || '').toLowerCase().endsWith('.session');
+	  try {
+		const bytes = new Uint8Array(await file.arrayBuffer());
+		return !!(await getArgSessionInfoFromBytes(bytes));
+	  } catch (_) {
+		return false;
+	  }
 	}
 
 	async function findFirstSessionFile(files) {
@@ -2459,12 +2564,6 @@
 
 	addFilesInput.addEventListener('change', async () => {
 	  if (!addFilesInput.files?.length) return;
-	  const sessionFile = await findFirstSessionFile(addFilesInput.files);
-	  if (sessionFile) {
-		setStatus('Saved session files can only be loaded from New Session.', 'warn');
-		addFilesInput.value = '';
-		return;
-	  }
 	  await ingestFilesIntoCatalog(addFilesInput.files, { append: true });
 	});
 
@@ -2826,6 +2925,7 @@
           bytes[i + 8] === 0x57 && bytes[i + 9] === 0x41 && bytes[i + 10] === 0x56 && bytes[i + 11] === 0x45
         ) return i;
         if (i + 12 <= bytes.length && bytes[i + 4] === 0x66 && bytes[i + 5] === 0x74 && bytes[i + 6] === 0x79 && bytes[i + 7] === 0x70) return i;
+        if (i + 2 <= bytes.length && bytes[i] === 0x1f && bytes[i + 1] === 0x8b) return i;
       }
       return -1;
     }
@@ -3464,6 +3564,18 @@
 
 	  while (cursor < bytes.length) {
 		const remaining = bytes.slice(cursor);
+		const argSessionInfo = await getArgSessionInfoFromBytes(remaining);
+		if (argSessionInfo) {
+		  segments.push({
+			type: 'file',
+			sniffed: { mime: 'application/gzip', ext: 'session', kind: 'source', label: 'ARG Session', sessionKind: 'arg_session' },
+			start: cursor,
+			end: bytes.length,
+			sessionInfo: argSessionInfo
+		  });
+		  break;
+		}
+
 		const sniffed = sniffFileTypeFromBytes(remaining);
 
 		if (sniffed && sniffed.kind === 'archive') {
@@ -3572,8 +3684,57 @@
 	  return `${dir}${base}.${ext}`;
 	}
 
+	function buildArgSessionPreviewText(sessionInfo) {
+	  const lines = ['ARG Session File'];
+	  lines.push(sessionInfo?.sessionName || 'ARG_Session');
+	  lines.push('Save/Open File Separately');
+	  return lines.join('\n');
+	}
+
+	function attachArgSessionMeta(meta, sessionInfo) {
+	  return {
+		...meta,
+		argSessionFile: true,
+		sessionName: sessionInfo?.sessionName || 'ARG_Session',
+		sessionSourceCount: sessionInfo?.sourceCount ?? null,
+		sessionDerivedAssetCount: sessionInfo?.derivedAssetCount ?? null,
+		sessionPayloadVersion: sessionInfo?.payloadVersion || null
+	  };
+	}
+
+
+
 	async function buildSessionInputNodeFromFile(file) {
 	  const bytes = new Uint8Array(await file.arrayBuffer());
+	  const argSessionInfo = await getArgSessionInfoFromBytes(bytes);
+	  const addedIso = new Date().toISOString();
+	  const modifiedIso = Number.isFinite(file.lastModified) && file.lastModified > 0 ? new Date(file.lastModified).toISOString() : null;
+
+	  if (argSessionInfo) {
+		const sessionNode = makeNode({
+		  kind: 'source',
+		  role: 'session_input',
+		  label: file.name || argSessionInfo.sessionName || 'ARG_Session',
+		  path: `/${file.name || argSessionInfo.sessionName || 'ARG_Session'}`,
+		  byteStart: 0,
+		  byteEnd: bytes.length,
+		  size: bytes.length,
+		  mime: 'application/gzip',
+		  ext: 'session',
+		  bytes,
+		  meta: attachArgSessionMeta({
+			fileName: file.name,
+			originalSize: bytes.length,
+			timestamps: {
+			  added: addedIso,
+			  modified: modifiedIso
+			}
+		  }, argSessionInfo)
+		});
+		sessionNode.children = [];
+		return { sessionNode, bytes };
+	  }
+
 	  const builtRoot = await buildTopLevelCatalog(bytes, file.name);
 
 	  await expandCatalog(builtRoot);
@@ -3592,8 +3753,8 @@
 		  fileName: file.name,
 		  originalSize: bytes.length,
 		  timestamps: {
-			added: new Date().toISOString(),
-			modified: Number.isFinite(file.lastModified) && file.lastModified > 0 ? new Date(file.lastModified).toISOString() : null
+			added: addedIso,
+			modified: modifiedIso
 		  }
 		}
 	  });
@@ -3641,9 +3802,16 @@
 		  
 		  const labelBase = applyDetectedExtension(rawLabelBase, sniffed);
 
+		  const fileMeta = {
+			fileName: labelBase,
+			sniffed,
+			topLevelIndex: i
+		  };
+		  const isArgSessionSource = sniffed.kind === 'source' && sniffed.sessionKind === 'arg_session';
+
 		  root.children.push(makeNode({
 			kind: sniffed.kind || 'binary',
-			role: 'top_level_file',
+			role: isArgSessionSource ? 'arg_session_file' : 'top_level_file',
 			label: labelBase,
 			path: `/${labelBase}`,
 			byteStart: seg.start,
@@ -3653,11 +3821,7 @@
 			ext,
 			archiveType: sniffed.archiveType || null,
 			bytes: bytes.slice(seg.start, seg.end),
-			meta: {
-			  fileName: labelBase,
-			  sniffed,
-			  topLevelIndex: i
-			}
+			meta: isArgSessionSource ? attachArgSessionMeta(fileMeta, seg.sessionInfo) : fileMeta
 		  }));
 
 		  continue;
@@ -3709,6 +3873,29 @@
 	  const hitOffset = findNextKnownHeader(fileBytes, endOffset);
 	  if (hitOffset !== -1 && hitOffset < fileBytes.length) {
 		const candidateBytes = fileBytes.slice(hitOffset);
+		const argSessionInfo = await getArgSessionInfoFromBytes(candidateBytes);
+		if (argSessionInfo) {
+		  const sessionLabel = `${argSessionInfo.sessionName || 'ARG_Session'}.session`;
+		  parentNode.children.push(makeNode({
+			kind: 'source',
+			role: 'arg_session_file',
+			label: sessionLabel,
+			path: `${basePath}#session_${hitOffset}`,
+			byteStart: hitOffset,
+			byteEnd: fileBytes.length,
+			size: candidateBytes.length,
+			mime: 'application/gzip',
+			ext: 'session',
+			parentId: parentNode.id,
+			bytes: candidateBytes,
+			meta: attachArgSessionMeta({
+			  embeddedSessionOffset: hitOffset,
+			  embeddedIn: parentNode.path || basePath
+			}, argSessionInfo)
+		  }));
+		  return true;
+		}
+
 		const sniffed = sniffFileTypeFromBytes(candidateBytes);
 
 		if (sniffed && sniffed.kind === 'archive') {
@@ -4316,7 +4503,10 @@ function clearMultipartIssueStatus(node) {
 	  for (const entry of result.entries) {
 		if (entry.isDir) continue;
 
-		const sniffed = sniffFileTypeFromBytes(entry.bytes);
+		const argSessionInfo = await getArgSessionInfoFromBytes(entry.bytes);
+		const sniffed = argSessionInfo
+		  ? { mime: 'application/gzip', ext: 'session', kind: 'source', label: 'ARG Session', sessionKind: 'arg_session' }
+		  : sniffFileTypeFromBytes(entry.bytes);
 		const normalizedEntryPath = normalizeArchiveEntryLookupPath(entry.path);
 		const sltMeta =
 		  sltByPath.get(entry.path) ||
@@ -4325,12 +4515,19 @@ function clearMultipartIssueStatus(node) {
 		  null;
 		const archiveTimestamps = extractArchiveTimestampsFromSlt(sltMeta);
 
-		const normalizedLabel = applyDetectedExtension(entry.name, sniffed);
-		const normalizedPath = applyDetectedExtension(entry.path, sniffed);
+		const normalizedLabel = argSessionInfo ? (entry.name || argSessionInfo.sessionName || 'ARG_Session') : applyDetectedExtension(entry.name, sniffed);
+		const normalizedPath = argSessionInfo ? (entry.path || normalizedLabel) : applyDetectedExtension(entry.path, sniffed);
+		const childMeta = {
+		  originalArchivePath: entry.path,
+		  isAdsLike: entry.path.includes(':'),
+		  sniffed,
+		  slt: sltMeta,
+		  timestamps: archiveTimestamps
+		};
 
 		const child = makeNode({
 		  kind: sniffed?.kind || 'text',
-		  role: 'archive_member',
+		  role: argSessionInfo ? 'arg_session_file' : 'archive_member',
 		  label: normalizedLabel,
 		  path: normalizedPath,
 		  byteStart: null,
@@ -4341,16 +4538,14 @@ function clearMultipartIssueStatus(node) {
 		  archiveType: sniffed?.archiveType || null,
 		  parentId: node.id,
 		  bytes: entry.bytes,
-		  meta: {
-			originalArchivePath: entry.path,
-			isAdsLike: entry.path.includes(':'),
-			sniffed,
-			slt: sltMeta,
-			timestamps: archiveTimestamps
-		  }
+		  meta: argSessionInfo ? attachArgSessionMeta(childMeta, argSessionInfo) : childMeta
 		});
 
 		node.children.push(child);
+
+		if (argSessionInfo) {
+		  continue;
+		}
 
 		if (child.mime && child.mime.startsWith('image/')) {
 		  await expandEmbeddedContentFromImageNode(child, depth);
@@ -5162,6 +5357,79 @@ function clearMultipartIssueStatus(node) {
 		);
 	  }
 	}
+
+
+	function readWavRiffChunks(bytes) {
+	  if (!bytes || bytes.length < 12) return [];
+	  if (readAscii(bytes, 0, 4) !== 'RIFF' || readAscii(bytes, 8, 4) !== 'WAVE') return [];
+	  const chunks = [];
+	  let offset = 12;
+	  while (offset + 8 <= bytes.length) {
+		const id = readAscii(bytes, offset, 4);
+		const size = readU32LEAt(bytes, offset + 4);
+		const dataStart = offset + 8;
+		if (dataStart > bytes.length) break;
+		const dataEnd = Math.min(bytes.length, dataStart + size);
+		chunks.push({ id, size, dataStart, dataEnd });
+		if (!Number.isFinite(size) || size < 0) break;
+		const next = dataStart + size + (size % 2);
+		if (next <= offset) break;
+		offset = next;
+	  }
+	  return chunks;
+	}
+
+	function parseWavEmbeddedId3Metadata(bytes) {
+	  const chunks = readWavRiffChunks(bytes);
+	  const tags = [];
+	  let coverArtBytes = null;
+	  let found = false;
+
+	  for (const chunk of chunks) {
+		const chunkId = String(chunk.id || '').toLowerCase();
+		if (chunkId !== 'id3 ' && chunkId !== 'id3\0' && chunkId.trim() !== 'id3') continue;
+		const payload = bytes.slice(chunk.dataStart, chunk.dataEnd);
+		if (payload.length < 10 || readAscii(payload, 0, 3) !== 'ID3') continue;
+		found = true;
+		const parsed = parseMp3Id3v2(payload);
+		if (!parsed) continue;
+		if (parsed.tags?.length) tags.push(...parsed.tags);
+		if (!coverArtBytes && parsed.coverArtBytes?.length) coverArtBytes = parsed.coverArtBytes;
+	  }
+
+	  return found ? { tags, coverArtBytes } : null;
+	}
+
+	async function attachWavDerivedMetadata(node) {
+	  if (!node || !node.bytes) return;
+	  if (node.meta?.wavDerivedAttached) return;
+
+	  node.meta.wavDerivedAttached = true;
+
+	  const parsed = parseWavEmbeddedId3Metadata(node.bytes);
+	  if (!parsed) return;
+
+	  if (parsed.tags.length) {
+		attachDerivedMetadataTextNode(
+		  node,
+		  'Metadata',
+		  '#metadata',
+		  buildMetadataText('Metadata', parsed.tags),
+		  'wav_id3_tags',
+		  { tags: parsed.tags }
+		);
+	  }
+
+	  if (parsed.coverArtBytes && parsed.coverArtBytes.length) {
+		attachDerivedPreviewImageNode(
+		  node,
+		  'Cover Art',
+		  '#cover_art',
+		  parsed.coverArtBytes,
+		  'wav_cover_art'
+		);
+	  }
+	}
 	
 	function readMp4Atoms(bytes, start = 0, end = bytes.length) {
 	  const atoms = [];
@@ -5446,7 +5714,7 @@ function clearMultipartIssueStatus(node) {
 		  lines.push(`Translated Keyword: ${item.translatedKeyword}`);
 		}
 
-		return lines.join('\n');
+		return lines.join('\\n');
 	  }).join('\n\n');
 	}
 
@@ -5641,6 +5909,8 @@ function clearMultipartIssueStatus(node) {
 		} else if (node.kind === 'audio') {
 		  if (node.mime === 'audio/mpeg') {
 			await attachMp3DerivedMetadata(node);
+		  } else if (node.mime === 'audio/wav') {
+			await attachWavDerivedMetadata(node);
 		  } else if (node.mime === 'audio/mp4') {
 			await attachMp4DerivedMetadata(node);
 		  }
@@ -5693,10 +5963,12 @@ function clearMultipartIssueStatus(node) {
         if (!node.bytes) continue;
 		
 		if (node.role === 'session_input') {
-		  const sniffed = sniffFileTypeFromBytes(node.bytes) || {};
+		  const sniffed = node.meta?.argSessionFile
+			? { mime: 'application/gzip', ext: 'session', kind: 'source' }
+			: (sniffFileTypeFromBytes(node.bytes) || {});
 
 		  let url = null;
-		  if (sniffed.kind === 'image' || sniffed.kind === 'audio' || sniffed.kind === 'video') {
+		  if (!node.meta?.argSessionFile && (sniffed.kind === 'image' || sniffed.kind === 'audio' || sniffed.kind === 'video')) {
 			url = getObjectUrlForNode(node, sniffed.mime || 'application/octet-stream');
 		  }
 
@@ -5709,7 +5981,24 @@ function clearMultipartIssueStatus(node) {
 			mime: sniffed.mime || 'application/octet-stream',
 			ext: sniffed.ext || 'bin',
 			size: node.size,
-			text: null,
+			text: node.meta?.argSessionFile ? buildArgSessionPreviewText(node.meta) : null,
+			node
+		  });
+
+		  continue;
+		}
+
+		if (node.kind === 'source') {
+		  assets.push({
+			nodeId: node.id,
+			kind: 'source',
+			label: node.label,
+			path: node.path,
+			url: null,
+			mime: node.mime || 'application/octet-stream',
+			ext: node.ext || 'bin',
+			size: node.size,
+			text: node.meta?.argSessionFile ? buildArgSessionPreviewText(node.meta) : null,
 			node
 		  });
 
@@ -5820,16 +6109,19 @@ function clearMultipartIssueStatus(node) {
 	  const isBitplane = mode === 'bitplane';
 	  const isScan = mode === 'scan';
 	  const isSpectrogram = mode === 'spectrogram';
+	  const isAudioTools = mode === 'audioTools';
 	  const isInfo = mode === 'info';
 
 	  imageBitplaneSection.hidden = !isBitplane;
 	  imageScanSection.hidden = !isScan;
 	  audioSpectrogramSection.hidden = !isSpectrogram;
+	  if (audioToolsSection) audioToolsSection.hidden = !isAudioTools;
 	  if (assetInfoSection) assetInfoSection.hidden = !isInfo;
 
 	  imageModeBitplaneBtn.classList.toggle('active', isBitplane);
 	  imageModeScanBtn.classList.toggle('active', isScan);
 	  audioModeSpectrogramBtn.classList.toggle('active', isSpectrogram);
+	  if (audioToolsBtn) audioToolsBtn.classList.toggle('active', isAudioTools);
 	  if (assetInfoModeBtn) assetInfoModeBtn.classList.toggle('active', isInfo);
 	  if (!isInfo) state.imageViewer.infoHashToken++;
 	}
@@ -5885,6 +6177,7 @@ function clearMultipartIssueStatus(node) {
       state.imageViewer.imageMirrorHorizontal = false;
       state.imageViewer.imageMirrorVertical = false;
       clearBitplaneXorState();
+      clearAudioXorWorkingState();
       syncBitRangeOptions();
       updateImageTransformButtons();
       clearStoredSpectrogram();
@@ -5893,6 +6186,12 @@ function clearMultipartIssueStatus(node) {
       imageViewerStatusEl.textContent = '';
       imageScanStatusEl.className = 'muted';
       imageScanStatusEl.textContent = 'No scan run yet.';
+      if (audioXorAssetSelect) audioXorAssetSelect.value = '';
+      if (audioToolsStatusEl) {
+		audioToolsStatusEl.className = 'muted';
+		audioToolsStatusEl.textContent = '';
+      }
+      updateAudioXorButtonState();
     }
 
 	function getCurrentBitplaneSettings() {
@@ -6755,11 +7054,10 @@ function clearMultipartIssueStatus(node) {
 	  return renderSourceCanvasToCanvas(frame.canvas, settings);
 	}
 
-	async function getDecodedAudioBufferForAsset(asset) {
-	  if (!asset || !['audio', 'video'].includes(asset.kind) || !asset.node?.bytes) return null;
+	async function decodeAudioBufferFromBytes(bytes, cacheKey = null) {
+	  if (!bytes?.length) return null;
 
-	  const cacheKey = asset.nodeId;
-	  if (state.imageViewer.audioBufferCache.has(cacheKey)) {
+	  if (cacheKey && state.imageViewer.audioBufferCache.has(cacheKey)) {
 		return state.imageViewer.audioBufferCache.get(cacheKey);
 	  }
 
@@ -6768,14 +7066,24 @@ function clearMultipartIssueStatus(node) {
 
 	  const ctx = new AudioCtx();
 	  try {
-		const bytes = asset.node.bytes;
 		const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 		const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
-		state.imageViewer.audioBufferCache.set(cacheKey, decoded);
+		if (cacheKey) state.imageViewer.audioBufferCache.set(cacheKey, decoded);
 		return decoded;
 	  } finally {
 		await ctx.close();
 	  }
+	}
+
+	async function getDecodedAudioBufferForAsset(asset) {
+	  if (!asset || !['audio', 'video'].includes(asset.kind) || !asset.node?.bytes) return null;
+
+	  const working = getAudioXorWorkingForAsset(asset);
+	  if (working?.bytes?.length) {
+		return await decodeAudioBufferFromBytes(working.bytes);
+	  }
+
+	  return await decodeAudioBufferFromBytes(asset.node.bytes, asset.nodeId);
 	}
 
 	function nextPow2(value) {
@@ -7395,6 +7703,20 @@ function clearMultipartIssueStatus(node) {
 	  return '';
 	}
 
+	function trimOuterEmptyAsciiLines(textValue) {
+	  const normalized = String(textValue || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+	  const lines = normalized.split('\n');
+	  let start = 0;
+	  let end = lines.length;
+	  while (start < end && lines[start] === '') start++;
+	  while (end > start && lines[end - 1] === '') end--;
+	  return lines.slice(start, end).join('\n');
+	}
+
+	function getAsciiDisplayText(asset) {
+	  return trimOuterEmptyAsciiLines(getAssetTextValue(asset));
+	}
+
 	function bytesToEscapedBinaryString(bytes) {
 	  if (!bytes?.length) return '';
 	  let out = '';
@@ -7678,6 +8000,11 @@ function clearMultipartIssueStatus(node) {
 
 	  if (textFileSection) textFileSection.hidden = !isText || editing || binaryToolsOpen;
 	  if (textBinaryViewBtn) textBinaryViewBtn.classList.toggle('active', binaryView);
+	  if (textSaveImageBtn) {
+		const showAsciiSave = asset?.kind === 'ascii';
+		textSaveImageBtn.hidden = !showAsciiSave;
+		textSaveImageBtn.disabled = !showAsciiSave || editing || binaryToolsOpen;
+	  }
 	  if (binaryToolsBtn) {
 		binaryToolsBtn.hidden = !hasBytes;
 		binaryToolsBtn.classList.toggle('active', binaryToolsOpen);
@@ -8030,6 +8357,161 @@ function clearMultipartIssueStatus(node) {
 	function evaluationProducedUsefulResult(node) {
 	  if (!node?.children?.length) return false;
 	  return flattenNodes(node).some(child => child && child !== node && !['text', 'ascii'].includes(child.kind));
+	}
+
+	function getAsciiDensityValue(ch) {
+	  const value = String(ch || ' ');
+	  if (!value || /\s/.test(value)) return 255;
+	  const ramp = " .'`^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+	  const index = ramp.indexOf(value);
+	  if (index < 0) return 0;
+	  const norm = index / Math.max(1, ramp.length - 1);
+	  return Math.max(0, Math.min(255, Math.round(255 - norm * 255)));
+	}
+
+	function getAsciiImageVerticalScale(textValue) {
+	  const normalized = String(textValue || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+	  const lines = normalized.split('\n');
+	  const width = Math.max(1, ...lines.map(line => line.length));
+	  const lineCount = Math.max(1, lines.length);
+
+	  const measure = document.createElement('pre');
+	  measure.className = 'mono ascii-fit';
+	  measure.textContent = normalized || ' ';
+	  measure.setAttribute('aria-hidden', 'true');
+	  Object.assign(measure.style, {
+		position: 'fixed',
+		left: '-100000px',
+		top: '0',
+		visibility: 'hidden',
+		pointerEvents: 'none',
+		transform: 'none',
+		width: 'auto',
+		maxWidth: 'none',
+		maxHeight: 'none',
+		overflow: 'visible',
+		margin: '0',
+		padding: '0',
+		border: '0',
+		fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+		fontSize: '16px',
+		lineHeight: '1.05',
+		letterSpacing: '0',
+		whiteSpace: 'pre'
+	  });
+
+	  document.body.appendChild(measure);
+	  try {
+		const measuredWidth = measure.scrollWidth || measure.getBoundingClientRect().width;
+		const measuredHeight = measure.scrollHeight || measure.getBoundingClientRect().height;
+		const charWidth = measuredWidth / width;
+		const rowHeight = measuredHeight / lineCount;
+		const measuredScale = rowHeight / Math.max(0.001, charWidth);
+		if (Number.isFinite(measuredScale) && measuredScale > 0) {
+		  return Math.max(1.5, Math.min(3, measuredScale));
+		}
+	  } finally {
+		measure.remove();
+	  }
+
+	  return 2.2;
+	}
+
+	function buildAsciiImageCanvasFromText(textValue) {
+	  const normalized = String(textValue || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+	  const lines = normalized.split('\n');
+	  const charCountWidth = Math.max(1, ...lines.map(line => line.length));
+	  const lineCount = Math.max(1, lines.length);
+	  const verticalScale = getAsciiImageVerticalScale(textValue);
+	  const pixelWidthPerChar = 2;
+	  const pixelHeightPerRow = verticalScale * pixelWidthPerChar;
+	  const canvasWidth = Math.max(1, charCountWidth * pixelWidthPerChar);
+	  const canvasHeight = Math.max(lineCount, Math.round(lineCount * pixelHeightPerRow));
+	  const canvas = document.createElement('canvas');
+	  canvas.width = canvasWidth;
+	  canvas.height = canvasHeight;
+	  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+	  const image = ctx.createImageData(canvasWidth, canvasHeight);
+	  for (let y = 0; y < lineCount; y++) {
+		const line = lines[y] || '';
+		const y0 = Math.max(0, Math.min(canvasHeight - 1, Math.round(y * pixelHeightPerRow)));
+		const y1 = Math.max(y0 + 1, Math.min(canvasHeight, Math.round((y + 1) * pixelHeightPerRow)));
+		for (let x = 0; x < charCountWidth; x++) {
+		  const ch = x < line.length ? line[x] : ' ';
+		  const gray = getAsciiDensityValue(ch);
+		  const x0 = x * pixelWidthPerChar;
+		  const x1 = Math.min(canvasWidth, x0 + pixelWidthPerChar);
+		  for (let yy = y0; yy < y1; yy++) {
+			for (let xx = x0; xx < x1; xx++) {
+			  const idx = (yy * canvasWidth + xx) * 4;
+			  image.data[idx] = gray;
+			  image.data[idx + 1] = gray;
+			  image.data[idx + 2] = gray;
+			  image.data[idx + 3] = 255;
+			}
+		  }
+		}
+	  }
+	  ctx.putImageData(image, 0, 0);
+	  canvas.dataset.asciiVerticalScale = String(verticalScale);
+	  canvas.dataset.asciiLineCount = String(lineCount);
+	  canvas.dataset.asciiCharCountWidth = String(charCountWidth);
+	  return canvas;
+	}
+
+	function buildAsciiImageLabel(label) {
+	  return `${stripExtension(label, 'ASCII')}_Image_${buildTimestamp()}.png`;
+	}
+
+	async function saveCurrentAsciiAsImage() {
+	  const asset = getCurrentImageViewerAsset();
+	  if (!asset || asset.kind !== 'ascii' || !asset.node) return;
+	  const parentNode = getNodeById(state.catalog, asset.node.parentId) || state.catalog;
+	  const textValue = getAsciiDisplayText(asset);
+	  if (!textValue) {
+		imageViewerStatusEl.className = 'warn';
+		imageViewerStatusEl.textContent = 'ASCII asset is empty.';
+		return;
+	  }
+	  if (textSaveImageBtn) textSaveImageBtn.disabled = true;
+	  imageViewerStatusEl.className = 'muted';
+	  imageViewerStatusEl.textContent = 'Saving ASCII as image...';
+	  try {
+		const canvas = buildAsciiImageCanvasFromText(textValue);
+		const bytes = await canvasToPngBytes(canvas);
+		const label = buildAsciiImageLabel(asset.label);
+		const newNode = makeNode({
+		  kind: 'image',
+		  role: 'derived_ascii_image',
+		  label,
+		  path: joinNodePath(parentNode?.path || '/', label),
+		  byteStart: null,
+		  byteEnd: null,
+		  size: bytes.length,
+		  mime: 'image/png',
+		  ext: 'png',
+		  parentId: parentNode?.id || null,
+		  derived: true,
+		  sourceNodeId: asset.node.id,
+		  bytes,
+		  meta: {
+			derivedType: 'ascii_image_save',
+			asciiWidth: canvas.width,
+			asciiHeight: canvas.height,
+			asciiVerticalScale: Number(canvas.dataset.asciiVerticalScale || 2),
+			asciiLineCount: Number(canvas.dataset.asciiLineCount || canvas.height)
+		  }
+		});
+		parentNode.children.push(newNode);
+		refreshCatalogViews();
+		imageViewerStatusEl.className = 'ok';
+		imageViewerStatusEl.textContent = 'ASCII image saved to gallery.';
+	  } catch (err) {
+		imageViewerStatusEl.className = 'error';
+		imageViewerStatusEl.textContent = `Unable to save ASCII image: ${err?.message || err}`;
+	  } finally {
+		if (textSaveImageBtn) textSaveImageBtn.disabled = false;
+	  }
 	}
 
 	async function evaluateCurrentTextAsFile() {
@@ -8468,19 +8950,410 @@ async function applyTextTransform(direction) {
 		imageViewerStatusEl.textContent = err?.message || String(err);
 	  }
 	}
+
+
+	function getAudioXorWorkingForAsset(asset) {
+	  const assetKey = getImageViewerAssetKey(asset);
+	  const working = state.imageViewer.audioXor;
+	  if (!assetKey || !working || working.assetKey !== assetKey || !working.bytes?.length) return null;
+	  return working;
+	}
+
+	function revokeAudioXorWorkingUrl() {
+	  const working = state.imageViewer.audioXor;
+	  if (working?.url) {
+		try { URL.revokeObjectURL(working.url); } catch (_) {}
+	  }
+	}
+
+	function clearAudioXorWorkingState() {
+	  revokeAudioXorWorkingUrl();
+	  state.imageViewer.audioXor = {
+		assetKey: null,
+		sourceNodeId: null,
+		baseLabel: '',
+		bytes: null,
+		url: null,
+		sampleRate: null,
+		channels: null,
+		frames: null,
+		samplePatterns: null,
+		operations: []
+	  };
+	  updateAudioXorButtonState();
+	}
+
+	function syncAudioXorWorkingAsset(asset) {
+	  const assetKey = getImageViewerAssetKey(asset);
+	  const working = state.imageViewer.audioXor;
+	  if (!working?.assetKey || working.assetKey === assetKey) return;
+	  clearAudioXorWorkingState();
+	}
+
+	function setAudioXorWorkingForAsset(asset, bytes, details = {}) {
+	  const assetKey = getImageViewerAssetKey(asset);
+	  if (!assetKey || !bytes?.length) return null;
+	  revokeAudioXorWorkingUrl();
+	  const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+	  state.imageViewer.audioXor = {
+		assetKey,
+		sourceNodeId: asset?.node?.id || null,
+		baseLabel: asset?.label || 'Audio',
+		bytes,
+		url,
+		sampleRate: details.sampleRate ?? null,
+		channels: details.channels ?? null,
+		frames: details.frames ?? null,
+		samplePatterns: details.samplePatterns || null,
+		operations: details.operations || []
+	  };
+	  updateAudioXorButtonState();
+	  return state.imageViewer.audioXor;
+	}
+
+	function getActiveAudioUrlForAsset(asset) {
+	  const working = getAudioXorWorkingForAsset(asset);
+	  return working?.url || asset?.url || '';
+	}
+
+	function getActiveAudioBytesForAsset(asset) {
+	  const working = getAudioXorWorkingForAsset(asset);
+	  return working?.bytes || asset?.node?.bytes || null;
+	}
+
+	function updateAudioXorButtonState() {
+	  const asset = getCurrentImageViewerAsset();
+	  const canApply = !!(asset && asset.kind === 'audio' && audioXorAssetSelect?.value);
+	  const canSave = !!(asset && asset.kind === 'audio' && getAudioXorWorkingForAsset(asset)?.bytes?.length);
+	  if (audioXorApplyBtn) audioXorApplyBtn.disabled = !canApply;
+	  if (audioXorSaveBtn) audioXorSaveBtn.disabled = !canSave;
+	}
+
+	function refreshAudioXorAssetSelect(currentAsset) {
+	  if (!audioXorAssetSelect) return;
+	  const previousValue = audioXorAssetSelect.value || '';
+	  audioXorAssetSelect.innerHTML = '';
+
+	  const placeholder = document.createElement('option');
+	  placeholder.value = '';
+	  placeholder.textContent = 'Select audio asset';
+	  audioXorAssetSelect.appendChild(placeholder);
+
+	  const currentId = currentAsset?.node?.id || '';
+	  const audioAssets = (state.assets || [])
+		.filter(asset => asset && asset.kind === 'audio' && asset.node?.bytes?.length && asset.node.id !== currentId);
+
+	  for (const asset of audioAssets) {
+		const opt = document.createElement('option');
+		opt.value = asset.node.id;
+		opt.textContent = asset.label || asset.path || asset.node.id;
+		audioXorAssetSelect.appendChild(opt);
+	  }
+
+	  if (previousValue && Array.from(audioXorAssetSelect.options).some(opt => opt.value === previousValue)) {
+		audioXorAssetSelect.value = previousValue;
+	  } else {
+		audioXorAssetSelect.value = '';
+	  }
+
+	  updateAudioXorButtonState();
+	}
+
+
+	function parsePcm16WavBytes(bytes) {
+	  if (!bytes?.length || bytes.length < 44) return null;
+	  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	  const readAscii = (offset, length) => {
+		let out = '';
+		for (let i = 0; i < length; i++) out += String.fromCharCode(view.getUint8(offset + i));
+		return out;
+	  };
+	  if (readAscii(0, 4) !== 'RIFF' || readAscii(8, 4) !== 'WAVE') return null;
+	  let fmt = null;
+	  let dataOffset = -1;
+	  let dataSize = 0;
+	  let offset = 12;
+	  while (offset + 8 <= bytes.length) {
+		const chunkId = readAscii(offset, 4);
+		const chunkSize = view.getUint32(offset + 4, true);
+		const chunkDataOffset = offset + 8;
+		if (chunkDataOffset + chunkSize > bytes.length) break;
+		if (chunkId === 'fmt ') {
+		  fmt = {
+			audioFormat: view.getUint16(chunkDataOffset + 0, true),
+			channels: view.getUint16(chunkDataOffset + 2, true),
+			sampleRate: view.getUint32(chunkDataOffset + 4, true),
+			bitsPerSample: view.getUint16(chunkDataOffset + 14, true)
+		  };
+		} else if (chunkId === 'data') {
+		  dataOffset = chunkDataOffset;
+		  dataSize = chunkSize;
+		}
+		offset = chunkDataOffset + chunkSize + (chunkSize % 2);
+	  }
+	  if (!fmt || dataOffset < 0) return null;
+	  if (fmt.audioFormat !== 1 || fmt.bitsPerSample !== 16 || !fmt.channels || !fmt.sampleRate) return null;
+	  const sampleCount = Math.floor(dataSize / 2);
+	  const samplePatterns = new Uint16Array(sampleCount);
+	  let readOffset = dataOffset;
+	  for (let i = 0; i < sampleCount; i++, readOffset += 2) {
+		samplePatterns[i] = view.getUint16(readOffset, true);
+	  }
+	  return {
+		sampleRate: fmt.sampleRate,
+		channels: fmt.channels,
+		frames: Math.floor(sampleCount / Math.max(1, fmt.channels)),
+		samplePatterns
+	  };
+	}
+
+	async function canonicalizeAudioBytesToPcm16(bytes, cacheKey = null) {
+	  const parsed = parsePcm16WavBytes(bytes);
+	  if (parsed?.samplePatterns?.length) return parsed;
+	  const buffer = await decodeAudioBufferFromBytes(bytes, cacheKey);
+	  if (!buffer?.length || !buffer.numberOfChannels) return null;
+	  const channels = Math.max(1, buffer.numberOfChannels || 1);
+	  const frames = Math.max(0, buffer.length || 0);
+	  const sampleRate = Math.max(1, Math.round(buffer.sampleRate || 44100));
+	  const samplePatterns = new Uint16Array(frames * channels);
+	  let outIndex = 0;
+	  for (let frame = 0; frame < frames; frame++) {
+		for (let ch = 0; ch < channels; ch++) {
+		  samplePatterns[outIndex++] = getPcm16BitPatternFromFloat(getAudioBufferSample(buffer, ch, frame));
+		}
+	  }
+	  return { sampleRate, channels, frames, samplePatterns };
+	}
+
+	async function getCanonicalPcm16ForAsset(asset) {
+	  if (!asset || !['audio', 'video'].includes(asset.kind)) return null;
+	  const working = getAudioXorWorkingForAsset(asset);
+	  if (working?.samplePatterns?.length && working.frames && working.channels && working.sampleRate) {
+		return {
+		  sampleRate: working.sampleRate,
+		  channels: working.channels,
+		  frames: working.frames,
+		  samplePatterns: working.samplePatterns
+		};
+	  }
+	  if (!asset.node?.bytes?.length) return null;
+	  return await canonicalizeAudioBytesToPcm16(asset.node.bytes, asset.nodeId);
+	}
+
+	function getCanonicalPatternAt(canonical, channelIndex, frameIndex) {
+	  if (!canonical?.samplePatterns?.length || !canonical.frames || !canonical.channels) return 0;
+	  const safeFrame = ((frameIndex % canonical.frames) + canonical.frames) % canonical.frames;
+	  const safeChannel = ((channelIndex % canonical.channels) + canonical.channels) % canonical.channels;
+	  const idx = safeFrame * canonical.channels + safeChannel;
+	  return canonical.samplePatterns[idx] & 0xffff;
+	}
+
+	function getPcm16BitPatternFromFloat(sample) {
+	  const clamped = Math.max(-1, Math.min(1, Number(sample) || 0));
+	  const signed = Math.max(-32768, Math.min(32767, Math.round(clamped * 32768)));
+	  return signed & 0xffff;
+	}
+
+	function getAudioBufferSample(buffer, channelIndex, frameIndex) {
+	  if (!buffer || !buffer.length || !buffer.numberOfChannels) return 0;
+	  const safeFrame = ((frameIndex % buffer.length) + buffer.length) % buffer.length;
+	  const safeChannel = ((channelIndex % buffer.numberOfChannels) + buffer.numberOfChannels) % buffer.numberOfChannels;
+	  const channel = buffer.getChannelData(safeChannel);
+	  return channel[safeFrame] || 0;
+	}
+
+	function pcm16BitPatternsToWavBytes(samples, channelCount, sampleRate) {
+	  const safeChannelCount = Math.max(1, Math.round(channelCount || 1));
+	  const safeSampleRate = Math.max(1, Math.round(sampleRate || 44100));
+	  const dataSize = samples.length * 2;
+	  const bytesPerSample = 2;
+	  const blockAlign = safeChannelCount * bytesPerSample;
+	  const byteRate = safeSampleRate * blockAlign;
+	  const out = new Uint8Array(44 + dataSize);
+	  const view = new DataView(out.buffer);
+
+	  writeAsciiString(view, 0, 'RIFF');
+	  view.setUint32(4, 36 + dataSize, true);
+	  writeAsciiString(view, 8, 'WAVE');
+	  writeAsciiString(view, 12, 'fmt ');
+	  view.setUint32(16, 16, true);
+	  view.setUint16(20, 1, true);
+	  view.setUint16(22, safeChannelCount, true);
+	  view.setUint32(24, safeSampleRate, true);
+	  view.setUint32(28, byteRate, true);
+	  view.setUint16(32, blockAlign, true);
+	  view.setUint16(34, 16, true);
+	  writeAsciiString(view, 36, 'data');
+	  view.setUint32(40, dataSize, true);
+
+	  let offset = 44;
+	  for (let i = 0; i < samples.length; i++) {
+		view.setUint16(offset, samples[i] & 0xffff, true);
+		offset += 2;
+	  }
+
+	  return out;
+	}
+
+	function buildAudioXorLabel(baseLabel) {
+	  const base = stripExtension(baseLabel, 'Audio');
+	  return `${base}_AudioXOR_${buildTimestamp()}.wav`;
+	}
+
+
+	async function applyAudioSampleXor() {
+	  const asset = getCurrentImageViewerAsset();
+	  const keyId = audioXorAssetSelect?.value || '';
+	  if (!asset || asset.kind !== 'audio' || !asset.node?.bytes?.length || !keyId) return;
+	  const keyAsset = (state.assets || []).find(candidate => candidate?.node?.id === keyId) || null;
+	  if (!keyAsset || keyAsset.kind !== 'audio' || !keyAsset.node?.bytes?.length) {
+		if (audioToolsStatusEl) {
+		  audioToolsStatusEl.className = 'error';
+		  audioToolsStatusEl.textContent = 'Selected audio asset was not found.';
+		}
+		return;
+	  }
+
+	  if (audioXorApplyBtn) audioXorApplyBtn.disabled = true;
+	  if (audioToolsStatusEl) {
+		audioToolsStatusEl.className = 'muted';
+		audioToolsStatusEl.textContent = 'Applying sample XOR...';
+	  }
+
+	  try {
+		const working = getAudioXorWorkingForAsset(asset);
+		const baseCanonical = working?.samplePatterns?.length
+		  ? {
+			 sampleRate: working.sampleRate,
+			 channels: working.channels,
+			 frames: working.frames,
+			 samplePatterns: working.samplePatterns
+			}
+		  : await getCanonicalPcm16ForAsset(asset);
+		const keyCanonical = await getCanonicalPcm16ForAsset(keyAsset);
+		if (!baseCanonical?.samplePatterns?.length || !keyCanonical?.samplePatterns?.length) {
+		  throw new Error('Unable to decode one or both audio files.');
+		}
+
+		const channelCount = Math.max(1, baseCanonical.channels || 1);
+		const frameCount = Math.max(1, baseCanonical.frames || 0);
+		const sampleRate = Math.max(1, Math.round(baseCanonical.sampleRate || 44100));
+		const outSamples = new Uint16Array(baseCanonical.samplePatterns);
+		let outIndex = 0;
+
+		for (let frame = 0; frame < frameCount; frame++) {
+		  for (let ch = 0; ch < channelCount; ch++) {
+			const keyBits = getCanonicalPatternAt(keyCanonical, ch, frame);
+			outSamples[outIndex] = (outSamples[outIndex] ^ keyBits) & 0xffff;
+			outIndex += 1;
+		  }
+		}
+
+		const bytes = pcm16BitPatternsToWavBytes(outSamples, channelCount, sampleRate);
+		const operations = [
+		  ...(working?.operations || []),
+		  {
+			keyNodeId: keyAsset.node.id,
+			keyLabel: keyAsset.label || '',
+			appliedAt: new Date().toISOString()
+		  }
+		];
+
+		setAudioXorWorkingForAsset(asset, bytes, {
+		  sampleRate,
+		  channels: channelCount,
+		  frames: frameCount,
+		  samplePatterns: outSamples,
+		  operations
+		});
+		clearStoredSpectrogram();
+		if (audioToolsStatusEl) {
+		  audioToolsStatusEl.className = 'ok';
+		  audioToolsStatusEl.textContent = 'Sample XOR applied.';
+		}
+		await updateImageViewer();
+	  } catch (err) {
+		if (audioToolsStatusEl) {
+		  audioToolsStatusEl.className = 'error';
+		  audioToolsStatusEl.textContent = `Unable to apply sample XOR: ${err?.message || err}`;
+		}
+	  } finally {
+		updateAudioXorButtonState();
+	  }
+	}
+
+	async function saveCurrentAudioSampleXor() {
+	  const asset = getCurrentImageViewerAsset();
+	  const working = getAudioXorWorkingForAsset(asset);
+	  if (!asset || asset.kind !== 'audio' || !asset.node || !working?.bytes?.length) return;
+
+	  if (audioXorSaveBtn) audioXorSaveBtn.disabled = true;
+	  if (audioToolsStatusEl) {
+		audioToolsStatusEl.className = 'muted';
+		audioToolsStatusEl.textContent = 'Saving audio...';
+	  }
+
+	  try {
+		const parentNode = getNodeById(state.catalog, asset.node.parentId) || state.catalog;
+		const label = buildAudioXorLabel(asset.label);
+		const bytes = working.bytes;
+		const newNode = makeNode({
+		  kind: 'audio',
+		  role: 'derived_audio_sample_xor',
+		  label,
+		  path: joinNodePath(parentNode?.path || '/', label),
+		  byteStart: null,
+		  byteEnd: null,
+		  size: bytes.length,
+		  mime: 'audio/wav',
+		  ext: 'wav',
+		  parentId: parentNode?.id || null,
+		  derived: true,
+		  sourceNodeId: asset.node.id,
+		  bytes,
+		  meta: {
+			derivedType: 'audio_sample_xor',
+			sampleRate: working.sampleRate,
+			channels: working.channels,
+			frames: working.frames,
+			pcmBits: 16,
+			keyMode: 'repeat',
+			operations: working.operations || []
+		  }
+		});
+
+		parentNode.children.push(newNode);
+		refreshCatalogViews();
+		if (audioToolsStatusEl) {
+		  audioToolsStatusEl.className = 'ok';
+		  audioToolsStatusEl.textContent = 'Audio sample XOR saved to gallery.';
+		}
+	  } catch (err) {
+		if (audioToolsStatusEl) {
+		  audioToolsStatusEl.className = 'error';
+		  audioToolsStatusEl.textContent = `Unable to save audio: ${err?.message || err}`;
+		}
+	  } finally {
+		updateAudioXorButtonState();
+	  }
+	}
+
 function updateImageViewerToolVisibility(asset) {
 	  const isImage = !!asset && asset.kind === 'image';
 	  const isVideo = !!asset && asset.kind === 'video';
 	  const isAudio = !!asset && asset.kind === 'audio';
 	  const spectrogramCapable = isAudio || isVideo;
+	  const audioToolsCapable = isAudio;
 	  const bitplaneCapable = isImage || isVideo;
 	  const showScan = bitplaneCapable || (spectrogramCapable && state.imageViewer.mode === 'spectrogram');
 
 	  imageModeBitplaneBtn.hidden = !bitplaneCapable;
 	  imageModeScanBtn.hidden = !showScan;
 	  audioModeSpectrogramBtn.hidden = !spectrogramCapable;
+	  if (audioToolsBtn) audioToolsBtn.hidden = !audioToolsCapable;
 	  if (assetInfoModeBtn) assetInfoModeBtn.hidden = !asset;
 	  updateTextEditSection(asset);
+	  refreshAudioXorAssetSelect(asset);
 	  if (videoFrameSection) videoFrameSection.hidden = !(asset && asset.kind === 'video');
 
 	  const mode = state.imageViewer.mode;
@@ -8488,7 +9361,8 @@ function updateImageViewerToolVisibility(asset) {
 		(!bitplaneCapable && mode === 'bitplane') ||
 		(!bitplaneCapable && !spectrogramCapable && mode === 'scan') ||
 		(!spectrogramCapable && mode === 'spectrogram') ||
-		(!bitplaneCapable && !spectrogramCapable && mode !== 'none');
+		(!audioToolsCapable && mode === 'audioTools') ||
+		(!bitplaneCapable && !spectrogramCapable && !audioToolsCapable && mode !== 'none');
 	  if (invalidMode) {
 		setImageViewerMode('none');
 	  }
@@ -8507,7 +9381,7 @@ function updateImageViewerToolVisibility(asset) {
 	  const wrap = document.createElement('div');
 	  wrap.className = 'viewer-media-wrap';
 	  const audio = document.createElement('audio');
-	  audio.src = asset.url;
+	  audio.src = getActiveAudioUrlForAsset(asset);
 	  audio.controls = true;
 	  audio.preload = 'metadata';
 	  wrap.appendChild(audio);
@@ -8558,8 +9432,8 @@ function updateImageViewerToolVisibility(asset) {
 	}
 
 	function fitAsciiBlockToStage(preEl, stageEl) {
-	  const stageWidth = Math.max(1, stageEl.clientWidth - 24);
-	  const stageHeight = Math.max(1, stageEl.clientHeight - 24);
+	  const stageWidth = Math.max(1, stageEl.clientWidth - 2);
+	  const stageHeight = Math.max(1, stageEl.clientHeight - 2);
 
 	  preEl.style.transform = 'none';
 	  preEl.style.transformOrigin = 'top left';
@@ -8604,7 +9478,7 @@ function updateImageViewerToolVisibility(asset) {
 	}
 
 	function getCurrentAudioPreviewBounds(asset) {
-	  const duration = asset?.duration || Number(audioSpectrogramEndTimeInput.value) || 0;
+	  const assetDuration = Number.isFinite(asset?.duration) && asset.duration > 0 ? asset.duration : 0;
 	  const hasActiveSpectrogramBounds =
 		state.imageViewer.mode === 'spectrogram' ||
 		(state.imageViewer.mode === 'scan' && hasStoredSpectrogramForAsset(asset));
@@ -8615,12 +9489,13 @@ function updateImageViewerToolVisibility(asset) {
 		  : 22050;
 		return {
 		  startTime: 0,
-		  endTime: duration > 0 ? duration : 1e9,
+		  endTime: assetDuration > 0 ? assetDuration : 1e9,
 		  minFreq: 10,
 		  maxFreq: nyquist
 		};
 	  }
 
+	  const duration = assetDuration || Number(audioSpectrogramEndTimeInput.value) || 0;
 	  let startTime = clampNumber(audioSpectrogramStartTimeInput.value, 0, duration || 0, 0);
 	  let endTime = clampNumber(audioSpectrogramEndTimeInput.value, 0, duration || 0, duration || startTime);
 	  if (endTime <= startTime) endTime = Math.min(duration || (startTime + 0.1), startTime + 0.1);
@@ -8962,7 +9837,9 @@ async function appendCanvasToViewerStage(canvas) {
 	  } else {
 		const pre = document.createElement('pre');
 		pre.className = asset.kind === 'ascii' ? 'mono ascii-fit' : 'mono';
-		pre.textContent = getAssetEditableTextValue(asset) || asset.label || '(no preview available)';
+		pre.textContent = asset.kind === 'ascii'
+		  ? (getAsciiDisplayText(asset) || asset.label || '(no preview available)')
+		  : (getAssetEditableTextValue(asset) || asset.label || '(no preview available)');
 		imageViewerStageEl.appendChild(pre);
 		if (asset.kind === 'ascii') {
 		  fitAsciiBlockToStage(pre, imageViewerStageEl);
@@ -8975,12 +9852,14 @@ async function appendCanvasToViewerStage(canvas) {
 	function prepareImageViewerRender(asset) {
 	  syncTextEditorStateForAsset(asset);
 	  syncBitplaneWorkingCanvasAsset(asset);
+	  syncAudioXorWorkingAsset(asset);
 	  updateImageViewerToolVisibility(asset);
 	  updateImageTransformButtons();
 	  populateImageXorAssetSelect(asset);
 	  clearImageViewerStage();
 
 	  imageViewerStageEl.classList.toggle('text-stage', ['text', 'ascii'].includes(asset.kind) || asset.node?.role === 'derived_metadata_text');
+	  imageViewerStageEl.classList.toggle('ascii-stage', asset.kind === 'ascii');
 
 	  imageViewerCounterEl.textContent = `${state.imageViewer.currentIndex + 1} / ${state.imageViewer.assets.length}`;
 	  imagePrevBtn.disabled = state.imageViewer.assets.length <= 1;
@@ -9336,6 +10215,10 @@ async function appendCanvasToViewerStage(canvas) {
 	  await evaluateCurrentTextAsFile();
 	});
 
+	if (textSaveImageBtn) textSaveImageBtn.addEventListener('click', async () => {
+	  await saveCurrentAsciiAsImage();
+	});
+
 	if (imageRotate90Btn) imageRotate90Btn.addEventListener('click', () => {
 	  state.imageViewer.imageRotateQuarterTurns = ((state.imageViewer.imageRotateQuarterTurns || 0) + 1) % 4;
 	  updateImageTransformButtons();
@@ -9476,6 +10359,26 @@ async function appendCanvasToViewerStage(canvas) {
 	
     downloadSelectedBtn.addEventListener('click', downloadSelectedAssets);
 	
+	if (audioToolsBtn) audioToolsBtn.addEventListener('click', async () => {
+	  setBinaryToolsOpen(false);
+	  const asset = getCurrentImageViewerAsset();
+	  if (!asset || asset.kind !== 'audio') return;
+	  const nextMode = state.imageViewer.mode === 'audioTools' ? 'none' : 'audioTools';
+	  setImageViewerMode(nextMode);
+	  refreshAudioXorAssetSelect(asset);
+	  if (audioToolsStatusEl) {
+		audioToolsStatusEl.className = 'muted';
+		audioToolsStatusEl.textContent = '';
+	  }
+	  await updateImageViewer();
+	});
+
+	if (audioXorAssetSelect) audioXorAssetSelect.addEventListener('change', updateAudioXorButtonState);
+
+	if (audioXorApplyBtn) audioXorApplyBtn.addEventListener('click', applyAudioSampleXor);
+
+	if (audioXorSaveBtn) audioXorSaveBtn.addEventListener('click', saveCurrentAudioSampleXor);
+
 	audioModeSpectrogramBtn.addEventListener('click', async () => {
 	  setBinaryToolsOpen(false);
 	  const asset = getCurrentImageViewerAsset();
@@ -10714,7 +11617,14 @@ async function appendCanvasToViewerStage(canvas) {
 
         const meta = document.createElement('div');
         meta.className = 'asset-card-meta muted mono';
-        meta.textContent = `${asset.path || '(no path)'}\n${asset.mime || ''}`;
+        if (asset.node?.meta?.argSessionFile) {
+          const details = [asset.path || '(no path)', asset.mime || 'application/gzip'];
+          if (asset.node.meta.sessionSourceCount != null) details.push(`sources=${asset.node.meta.sessionSourceCount}`);
+          if (asset.node.meta.sessionDerivedAssetCount != null) details.push(`derived=${asset.node.meta.sessionDerivedAssetCount}`);
+          meta.textContent = details.join('\n');
+        } else {
+          meta.textContent = `${asset.path || '(no path)'}\n${asset.mime || ''}`;
+        }
 
         card.appendChild(preview);
         card.appendChild(title);
@@ -11090,6 +12000,11 @@ async function appendCanvasToViewerStage(canvas) {
 		return;
 	  }
 
+	  if (!append && list.length === 1 && await isLikelySessionFile(list[0])) {
+		await importSessionFile(list[0]);
+		return;
+	  }
+
 	  if (!append) {
 		resetState();
 	  }
@@ -11138,13 +12053,7 @@ async function appendCanvasToViewerStage(canvas) {
 
 	fileInput.addEventListener('change', async () => {
 	  if (!fileInput.files?.length) return;
-	  const files = Array.from(fileInput.files);
-	  const sessionFile = await findFirstSessionFile(files);
-	  if (sessionFile) {
-		await importSessionFile(sessionFile);
-		return;
-	  }
-	  await ingestFilesIntoCatalog(files, { append: false });
+	  await ingestFilesIntoCatalog(Array.from(fileInput.files), { append: false });
 	});
 
   </script>
